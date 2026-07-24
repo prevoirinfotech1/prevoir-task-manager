@@ -25,7 +25,7 @@ const PRIORITIES_JS = ['High','Medium','Low'];
 
 let DB = { users: [], clients: [], tasks: [], otherTasks: [] };
 let session = null;
-let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', dashboardFilter:null, otherTaskFilter:'all', loginErr:null, loginBusy:false };
+let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomDate:'', loginErr:null, loginBusy:false };
 let modal = null;
 let toastMsg = null;
 
@@ -131,7 +131,8 @@ const ICONS = {
   tasks:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l2 2 4-4"/><rect x="3" y="3" width="18" height="18" rx="2.5"/></svg>',
   logout:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
   clock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
-  key:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="M11 12 20 3M20 3h-4M20 3v4"/></svg>'
+  key:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="M11 12 20 3M20 3h-4M20 3v4"/></svg>',
+  flame:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2c1 3-3 4-3 8a3 3 0 0 0 6 0c0-1-1-2-1-3 2 1 3 3 3 6a5 5 0 0 1-10 0c0-5 3-6 5-11Z"/></svg>'
 };
 function navItemsFor(role){
   if(role==='admin') return [
@@ -140,16 +141,20 @@ function navItemsFor(role){
     ['designers','Designers','users'],
     ['clients','Clients','clients'],
     ['alltasks','All Tasks','tasks'],
+    ['urgenttasks','Urgent Tasks','flame'],
     ['othertasks','Other Tasks','clock'],
   ];
   if(role==='manager') return [
     ['dashboard','Dashboard','dashboard'],
     ['myclients','My Clients','clients'],
+    ['alltasks','Search Tasks','tasks'],
+    ['urgenttasks','Urgent Tasks','flame'],
     ['othertasks','Other Tasks','clock'],
   ];
   return [
     ['dashboard','My Pending Tasks','clock'],
     ['myclients','My Clients','clients'],
+    ['urgenttasks','Urgent Tasks','flame'],
     ['othertasks','Other Tasks','clock'],
   ];
 }
@@ -175,7 +180,10 @@ function renderSidebar(){
 function renderApp(){
   const titleMap = {
     dashboard: session.role==='designer' ? 'My Pending Tasks' : 'Dashboard',
-    managers:'Managers', designers:'Designers', clients:'Clients', alltasks:'All Tasks', myclients:'My Clients', othertasks:'Other Tasks'
+    managers:'Managers', designers:'Designers', clients:'Clients',
+    alltasks: session.role==='admin' ? 'All Tasks' : 'Search Tasks',
+    urgenttasks:'Urgent Tasks',
+    myclients:'My Clients', othertasks:'Other Tasks'
   };
   return `
   <div class="app ${ui.navOpen?'nav-open':''}">
@@ -201,6 +209,7 @@ function renderTab(){
   if(ui.tab==='designers') return renderUserList('designer');
   if(ui.tab==='clients') return renderAdminClients();
   if(ui.tab==='alltasks') return renderAllTasks();
+  if(ui.tab==='urgenttasks') return renderUrgentTasks();
   if(ui.tab==='myclients') return ui.clientId ? renderClientDetail(ui.clientId) : renderMyClients();
   if(ui.tab==='othertasks') return renderOtherTasks();
   return '';
@@ -278,19 +287,77 @@ function renderDashboard(){
   }
   return '';
 }
+function tomorrowISO(){ const d=new Date(); d.setDate(d.getDate()+1); return d.toISOString().slice(0,10); }
+function selectedDesignerDate(){
+  if(ui.designerDateFilter==='tomorrow') return tomorrowISO();
+  if(ui.designerDateFilter==='custom') return ui.designerCustomDate || todayISO();
+  return todayISO();
+}
 function renderDesignerPending(){
-  const myTasks = tasksForUser().filter(t=>t.status!=='Completed').sort((a,b)=>(a.deadline||'').localeCompare(b.deadline||''));
-  const overdue = myTasks.filter(t=>daysDiff(t.deadline)<0).length;
+  const allMyTasks = tasksForUser().filter(t=>t.status!=='Completed');
+  const overdue = allMyTasks.filter(t=>daysDiff(t.deadline)<0).length;
+  const myOtherTasks = DB.otherTasks.filter(t=>t.assignedToId===session.id);
+
+  const selectedDate = selectedDesignerDate();
+  const dueClientTasks = allMyTasks.filter(t=>t.deadline===selectedDate).map(t=>Object.assign({_kind:'client'}, t));
+  const dueOtherTasks = myOtherTasks.filter(t=>t.status!=='Completed' && t.deadline===selectedDate).map(t=>Object.assign({_kind:'other'}, t));
+  const combined = [...dueClientTasks, ...dueOtherTasks].sort((a,b)=>{
+    const aUrgent = a._kind==='client' ? (a.isUrgent?0:1) : (a.priority==='High'?0:1);
+    const bUrgent = b._kind==='client' ? (b.isUrgent?0:1) : (b.priority==='High'?0:1);
+    return aUrgent - bUrgent;
+  });
+
+  const dateLabel = ui.designerDateFilter==='today' ? "Today's deadline" : ui.designerDateFilter==='tomorrow' ? "Tomorrow's deadline" : `Deadline: ${fmtDate(selectedDate)}`;
+
   return `
   <div class="stat-grid">
     <div class="stat-card"><div class="num">${clientsForUser().length}</div><div class="lbl">My clients</div></div>
-    <div class="stat-card primary"><div class="num">${myTasks.length}</div><div class="lbl">Pending tasks</div></div>
+    <div class="stat-card primary"><div class="num">${allMyTasks.length}</div><div class="lbl">Pending tasks</div></div>
     <div class="stat-card danger"><div class="num">${overdue}</div><div class="lbl">Overdue</div></div>
   </div>
   <div class="panel">
+    <div class="panel-head" style="flex-wrap:wrap; gap:10px;">
+      <h3>${dateLabel} (${combined.length})</h3>
+      <div class="toolbar">
+        <button class="btn btn-sm ${ui.designerDateFilter==='today'?'btn-primary':'btn-ghost'}" data-action="designerdate" data-value="today">Today</button>
+        <button class="btn btn-sm ${ui.designerDateFilter==='tomorrow'?'btn-primary':'btn-ghost'}" data-action="designerdate" data-value="tomorrow">Tomorrow</button>
+        <button class="btn btn-sm ${ui.designerDateFilter==='custom'?'btn-primary':'btn-ghost'}" data-action="designerdate" data-value="custom">Custom date</button>
+        ${ui.designerDateFilter==='custom' ? `<input type="date" id="designerCustomDateInput" value="${ui.designerCustomDate||todayISO()}" />` : ''}
+      </div>
+    </div>
+    <div class="panel-body pad0">${renderCombinedDueList(combined)}</div>
+  </div>
+  <div class="panel">
     <div class="panel-head"><h3>All pending tasks, soonest deadline first</h3></div>
-    <div class="panel-body pad0">${renderTaskTableRows(myTasks, true, false, true)}</div>
+    <div class="panel-body pad0">${renderTaskTableRows([...allMyTasks].sort((a,b)=>(a.deadline||'').localeCompare(b.deadline||'')), true, false, true)}</div>
   </div>`;
+}
+function renderCombinedDueList(items){
+  if(!items.length) return `<div class="empty-state"><b>Nothing due</b>No client tasks or other tasks are due on this date.</div>`;
+  return `<table><thead><tr><th>Source</th><th>Task</th><th>Client / From</th><th>Priority</th><th>Status</th><th></th></tr></thead><tbody>
+  ${items.map(it=>{
+    if(it._kind==='client'){
+      const c = clientById(it.clientId);
+      return `<tr class="row-hover ${it.isUrgent?'urgent-row':''}">
+        <td><span class="type-tag">Client task</span></td>
+        <td><b>${escapeHtml(it.objective||it.caption||'Content task')}</b><div class="muted" style="font-size:12px; margin-top:2px;">${escapeHtml(it.contentType||'')} · ${escapeHtml(it.postingType||'')}</div></td>
+        <td>${c?escapeHtml(c.name):'—'}</td>
+        <td>${it.isUrgent?'<span class="pill pill-urgent">🔥 Urgent</span>':'<span class="muted">—</span>'}</td>
+        <td>${statusPill(it)}</td>
+        <td><button class="btn btn-sm btn-accent" data-action="complete" data-id="${it.id}">Mark complete</button></td>
+      </tr>`;
+    }
+    const by = userById(it.assignedById);
+    return `<tr class="row-hover">
+      <td><span class="type-tag">Other task</span></td>
+      <td><b>${escapeHtml(it.title)}</b>${it.description?`<div class="muted" style="font-size:12px; margin-top:2px;">${escapeHtml(it.description)}</div>`:''}</td>
+      <td>${by?`From: ${escapeHtml(by.name)}`:'—'}${it.hasAttachment?` · <a href="/api/other-tasks/${it.id}/attachment">📎 ${escapeHtml(it.attachmentName||'File')}</a>`:''}</td>
+      <td>${priorityPill(it.priority)}</td>
+      <td>${statusPill(it)}</td>
+      <td><button class="btn btn-sm btn-accent" data-action="completeother" data-id="${it.id}">Mark complete</button></td>
+    </tr>`;
+  }).join('')}
+  </tbody></table>`;
 }
 
 /* ============================= TASK TABLE (shared) ============================= */
@@ -302,7 +369,7 @@ function renderTaskTableRows(tasks, showComplete, allowEdit, showClient){
   </tr></thead><tbody>
   ${tasks.map(t=>{
     const c = clientById(t.clientId);
-    return `<tr class="row-hover">
+    return `<tr class="row-hover ${t.isUrgent?'urgent-row':''}">
       ${showClient?`<td><b>${c?escapeHtml(c.name):'—'}</b></td>`:''}
       <td class="mono">${fmtDate(t.date)}</td>
       <td><span class="type-tag">${escapeHtml(t.contentType||'—')}</span></td>
@@ -312,10 +379,10 @@ function renderTaskTableRows(tasks, showComplete, allowEdit, showClient){
       <td class="cell-wrap">${t.reference?`<span class="muted">${escapeHtml(t.reference)}</span>`:'—'}</td>
       <td>${deadlineTag(t)}</td>
       <td class="cell-wrap">${escapeHtml(t.remark||'—')}</td>
-      <td>${statusPill(t)}</td>
+      <td>${statusPill(t)}${t.isUrgent?' <span class="pill pill-urgent">🔥 Urgent</span>':''}</td>
       ${showComplete||allowEdit ? `<td style="white-space:nowrap;">
         ${showComplete && t.status!=='Completed' ? `<button class="btn btn-sm btn-accent" data-action="complete" data-id="${t.id}">Mark complete</button>` : ''}
-        ${allowEdit ? `<button class="btn btn-sm btn-ghost" data-action="edittask" data-id="${t.id}">Edit</button> <button class="btn btn-sm btn-danger" data-action="deletetask" data-id="${t.id}">Delete</button>` : ''}
+        ${allowEdit ? `<button class="btn btn-sm ${t.isUrgent?'btn-ghost':'btn-danger'}" data-action="toggleurgent" data-id="${t.id}">${t.isUrgent?'Unmark urgent':'Mark urgent'}</button> <button class="btn btn-sm btn-ghost" data-action="edittask" data-id="${t.id}">Edit</button> <button class="btn btn-sm btn-danger" data-action="deletetask" data-id="${t.id}">Delete</button>` : ''}
       </td>` : ''}
     </tr>`;
   }).join('')}
@@ -397,22 +464,46 @@ function renderAllTasks(){
   if(ui.taskFilter==='pending') list = list.filter(t=>t.status!=='Completed');
   if(ui.taskFilter==='completed') list = list.filter(t=>t.status==='Completed');
   if(ui.taskFilter==='overdue') list = list.filter(t=>t.status!=='Completed' && daysDiff(t.deadline)<0);
+  if(ui.taskFilter==='urgent') list = list.filter(t=>t.isUrgent);
+  const q = (ui.taskSearch||'').trim().toLowerCase();
+  if(q){
+    list = list.filter(t=>{
+      const c = clientById(t.clientId);
+      const haystack = [c?c.name:'', t.objective, t.caption, t.details, t.remark, t.reference, t.contentType, t.postingType].join(' ').toLowerCase();
+      return haystack.includes(q);
+    });
+  }
   list = [...list].sort((a,b)=>(a.deadline||'').localeCompare(b.deadline||''));
   return `
   <div class="panel">
     <div class="panel-head" style="flex-wrap:wrap; gap:10px;">
-      <h3>All tasks (${list.length})</h3>
+      <h3>${DB.clients.length ? (session.role==='admin'?'All tasks':'Tasks across my clients') : 'Tasks'} (${list.length})</h3>
       <div class="toolbar">
+        <input type="text" id="taskSearchBox" placeholder="Search title, caption, objective…" value="${escapeHtml(ui.taskSearch||'')}" style="min-width:220px;" />
         <select id="filterClient"><option value="all">All clients</option>${clientOpts}</select>
         <select id="filterStatus">
           <option value="all" ${ui.taskFilter==='all'?'selected':''}>All statuses</option>
           <option value="pending" ${ui.taskFilter==='pending'?'selected':''}>Pending</option>
           <option value="completed" ${ui.taskFilter==='completed'?'selected':''}>Completed</option>
           <option value="overdue" ${ui.taskFilter==='overdue'?'selected':''}>Overdue</option>
+          <option value="urgent" ${ui.taskFilter==='urgent'?'selected':''}>Urgent</option>
         </select>
       </div>
     </div>
-    <div class="panel-body pad0">${renderTaskTableRows(list, false, false, true)}</div>
+    <div class="panel-body pad0">${renderTaskTableRows(list, false, true, true)}</div>
+  </div>`;
+}
+
+function renderUrgentTasks(){
+  const list = [...tasksForUser()].filter(t=>t.isUrgent).sort((a,b)=> (a.status==='Completed')-(b.status==='Completed') || (a.deadline||'').localeCompare(b.deadline||''));
+  const allowEdit = session.role==='admin' || session.role==='manager';
+  const showComplete = session.role==='designer';
+  return `
+  <div class="panel">
+    <div class="panel-head"><h3>Urgent tasks (${list.length})</h3></div>
+    <div class="panel-body pad0">
+      ${list.length ? renderTaskTableRows(list, showComplete, allowEdit, true) : `<div class="empty-state"><b>Nothing urgent right now</b>Tasks marked urgent by a manager or admin will show up here.</div>`}
+    </div>
   </div>`;
 }
 
@@ -708,7 +799,7 @@ function bindEvents(){
       try{
         await apiPost('/api/login', {username: fd.get('username').trim(), password: fd.get('password')});
         await refreshState();
-        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', dashboardFilter:null, otherTaskFilter:'all'};
+        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomDate:''};
         render();
       }catch(err){
         ui.loginErr = err.message; ui.loginBusy = false; render();
@@ -795,6 +886,29 @@ function bindEvents(){
   if(filterClient) filterClient.addEventListener('change', ()=>{ ui.taskClientFilter = filterClient.value; render(); });
   const filterStatus = document.getElementById('filterStatus');
   if(filterStatus) filterStatus.addEventListener('change', ()=>{ ui.taskFilter = filterStatus.value; render(); });
+  const taskSearchBox = document.getElementById('taskSearchBox');
+  if(taskSearchBox){
+    taskSearchBox.addEventListener('input', ()=>{
+      ui.taskSearch = taskSearchBox.value;
+      const cursorPos = taskSearchBox.selectionStart;
+      render();
+      const newBox = document.getElementById('taskSearchBox');
+      if(newBox){ newBox.focus(); newBox.setSelectionRange(cursorPos, cursorPos); }
+    });
+  }
+  root.querySelectorAll('[data-action="toggleurgent"]').forEach(el=> el.addEventListener('click', async ()=>{
+    const t = DB.tasks.find(x=>x.id===Number(el.getAttribute('data-id')));
+    try{ await apiPatch(`/api/tasks/${el.getAttribute('data-id')}`, {isUrgent: !(t && t.isUrgent)}); await refreshState(); showToast(t && t.isUrgent ? 'Unmarked as urgent' : 'Marked as urgent'); render(); }
+    catch(err){ showToast(err.message); }
+  }));
+
+  root.querySelectorAll('[data-action="designerdate"]').forEach(el=> el.addEventListener('click', ()=>{
+    ui.designerDateFilter = el.getAttribute('data-value');
+    if(ui.designerDateFilter==='custom' && !ui.designerCustomDate) ui.designerCustomDate = todayISO();
+    render();
+  }));
+  const designerCustomDateInput = document.getElementById('designerCustomDateInput');
+  if(designerCustomDateInput) designerCustomDateInput.addEventListener('change', ()=>{ ui.designerCustomDate = designerCustomDateInput.value; render(); });
 
   root.querySelectorAll('[data-action="importexcel"]').forEach(el=> el.addEventListener('click', ()=>{ document.getElementById('excelInput').click(); }));
   const excelInput = document.getElementById('excelInput');
