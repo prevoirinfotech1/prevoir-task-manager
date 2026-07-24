@@ -32,6 +32,7 @@ def create_app():
     with app.app_context():
         db.create_all()
         seed_default_admin()
+        migrate_legacy_single_assignments()
 
     register_routes(app)
     return app
@@ -42,6 +43,40 @@ def seed_default_admin():
         admin = User(name="Administrator", username="admin", role="admin", active=True)
         admin.set_password("admin123")
         db.session.add(admin)
+        db.session.commit()
+
+
+def migrate_legacy_single_assignments():
+    """
+    One-time, safe backfill: earlier versions stored a single manager/designer
+    per client in manager_id/designer_id columns. Those columns still exist
+    (untouched) on any database created by an earlier deploy. This copies
+    any values found there into the new many-to-many tables, then leaves the
+    old columns alone. Running this repeatedly is harmless — it only adds a
+    link if it's not already there.
+    """
+    try:
+        clients = Client.query.all()
+    except Exception:
+        return  # table doesn't exist yet on a brand-new database — nothing to migrate
+
+    changed = False
+    for c in clients:
+        if c.legacy_manager_id:
+            already = any(u.id == c.legacy_manager_id for u in c.managers)
+            if not already:
+                u = db.session.get(User, c.legacy_manager_id)
+                if u and u.role == "manager":
+                    c.managers.append(u)
+                    changed = True
+        if c.legacy_designer_id:
+            already = any(u.id == c.legacy_designer_id for u in c.designers)
+            if not already:
+                u = db.session.get(User, c.legacy_designer_id)
+                if u and u.role == "designer":
+                    c.designers.append(u)
+                    changed = True
+    if changed:
         db.session.commit()
 
 
@@ -67,16 +102,6 @@ def roles_required(*roles):
     return decorator
 
 
-def client_visible_to_current_user(client):
-    if current_user.role == "admin":
-        return True
-    if current_user.role == "manager":
-        return client.manager_id == current_user.id
-    if current_user.role == "designer":
-        return client.designer_id == current_user.id
-    return False
-
-
 def to_int_or_none(value):
     try:
         return int(value) if value not in (None, "", False) else None
@@ -84,12 +109,33 @@ def to_int_or_none(value):
         return None
 
 
+def to_int_list(values):
+    out = []
+    if not values:
+        return out
+    for v in values:
+        n = to_int_or_none(v)
+        if n is not None:
+            out.append(n)
+    return out
+
+
+def client_visible_to_current_user(client):
+    if current_user.role == "admin":
+        return True
+    if current_user.role == "manager":
+        return any(u.id == current_user.id for u in client.managers)
+    if current_user.role == "designer":
+        return any(u.id == current_user.id for u in client.designers)
+    return False
+
+
 def client_editable_by_current_user(client):
     """Managers/admin can edit task content. Designers cannot."""
     if current_user.role == "admin":
         return True
     if current_user.role == "manager":
-        return client.manager_id == current_user.id
+        return any(u.id == current_user.id for u in client.managers)
     return False
 
 
@@ -126,6 +172,20 @@ def register_routes(app):
             return jsonify({"user": None})
         return jsonify({"user": current_user.to_dict()})
 
+    @app.route("/api/me/change-password", methods=["POST"])
+    @login_required
+    def change_my_password():
+        data = request.get_json(silent=True) or {}
+        current_pw = data.get("currentPassword") or ""
+        new_pw = data.get("newPassword") or ""
+        if not current_user.check_password(current_pw):
+            return jsonify({"error": "Current password is incorrect."}), 400
+        if len(new_pw) < 4:
+            return jsonify({"error": "New password must be at least 4 characters."}), 400
+        current_user.set_password(new_pw)
+        db.session.commit()
+        return jsonify({"ok": True})
+
     # ---------- Bootstrap state ----------
     @app.route("/api/state")
     @login_required
@@ -135,9 +195,9 @@ def register_routes(app):
         if current_user.role == "admin":
             clients_q = Client.query
         elif current_user.role == "manager":
-            clients_q = Client.query.filter_by(manager_id=current_user.id)
+            clients_q = Client.query.filter(Client.managers.any(User.id == current_user.id))
         else:
-            clients_q = Client.query.filter_by(designer_id=current_user.id)
+            clients_q = Client.query.filter(Client.designers.any(User.id == current_user.id))
         clients = [c.to_dict() for c in clients_q.order_by(Client.created_at.desc()).all()]
 
         client_ids = [c["id"] for c in clients]
@@ -207,9 +267,13 @@ def register_routes(app):
         name = (data.get("name") or "").strip()
         if not name:
             return jsonify({"error": "Client name is required."}), 400
-        manager_id = to_int_or_none(data.get("managerId"))
-        designer_id = to_int_or_none(data.get("designerId"))
-        client = Client(name=name, manager_id=manager_id, designer_id=designer_id)
+        client = Client(name=name)
+        manager_ids = to_int_list(data.get("managerIds"))
+        designer_ids = to_int_list(data.get("designerIds"))
+        if manager_ids:
+            client.managers = User.query.filter(User.id.in_(manager_ids), User.role == "manager").all()
+        if designer_ids:
+            client.designers = User.query.filter(User.id.in_(designer_ids), User.role == "designer").all()
         db.session.add(client)
         db.session.commit()
         return jsonify({"client": client.to_dict()}), 201
@@ -221,10 +285,12 @@ def register_routes(app):
         if not client:
             return jsonify({"error": "Client not found."}), 404
         data = request.get_json(silent=True) or {}
-        if "managerId" in data:
-            client.manager_id = to_int_or_none(data["managerId"])
-        if "designerId" in data:
-            client.designer_id = to_int_or_none(data["designerId"])
+        if "managerIds" in data:
+            ids = to_int_list(data["managerIds"])
+            client.managers = User.query.filter(User.id.in_(ids), User.role == "manager").all() if ids else []
+        if "designerIds" in data:
+            ids = to_int_list(data["designerIds"])
+            client.designers = User.query.filter(User.id.in_(ids), User.role == "designer").all() if ids else []
         if "name" in data and data["name"].strip():
             client.name = data["name"].strip()
         db.session.commit()
@@ -277,7 +343,7 @@ def register_routes(app):
         data = request.get_json(silent=True) or {}
 
         if current_user.role == "designer":
-            if not client or client.designer_id != current_user.id:
+            if not client or not client_visible_to_current_user(client):
                 return jsonify({"error": "You don't have access to this task."}), 403
             # designers may only mark a task complete
             if set(data.keys()) - {"status"}:
