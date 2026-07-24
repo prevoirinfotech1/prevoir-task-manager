@@ -21,10 +21,11 @@ const apiDelete = (path)=> api(path, {method:'DELETE'});
 
 const CONTENT_TYPES = ['Static','Reel','Carousel'];
 const POSTING_TYPES = ['Story','Feed'];
+const PRIORITIES_JS = ['High','Medium','Low'];
 
-let DB = { users: [], clients: [], tasks: [] };
+let DB = { users: [], clients: [], tasks: [], otherTasks: [] };
 let session = null;
-let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', dashboardFilter:null, loginErr:null, loginBusy:false };
+let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', dashboardFilter:null, otherTaskFilter:'all', loginErr:null, loginBusy:false };
 let modal = null;
 let toastMsg = null;
 
@@ -39,7 +40,7 @@ function showToast(msg){ toastMsg = msg; render(); setTimeout(()=>{ toastMsg=nul
 async function refreshState(){
   const data = await apiGet('/api/state');
   session = data.me;
-  DB.users = data.users; DB.clients = data.clients; DB.tasks = data.tasks;
+  DB.users = data.users; DB.clients = data.clients; DB.tasks = data.tasks; DB.otherTasks = data.otherTasks || [];
 }
 
 /* ============================= DERIVED HELPERS ============================= */
@@ -73,6 +74,10 @@ function statusPill(task){
   if(d<0) return '<span class="pill pill-overdue">Overdue</span>';
   if(d<=2) return '<span class="pill pill-soon">Due soon</span>';
   return '<span class="pill pill-pending">Pending</span>';
+}
+function priorityPill(p){
+  const cls = p==='High' ? 'pill-priority-high' : p==='Low' ? 'pill-priority-low' : 'pill-priority-medium';
+  return `<span class="pill ${cls}">${escapeHtml(p||'Medium')}</span>`;
 }
 function deadlineTag(task){
   const d = daysDiff(task.deadline);
@@ -135,14 +140,17 @@ function navItemsFor(role){
     ['designers','Designers','users'],
     ['clients','Clients','clients'],
     ['alltasks','All Tasks','tasks'],
+    ['othertasks','Other Tasks','clock'],
   ];
   if(role==='manager') return [
     ['dashboard','Dashboard','dashboard'],
     ['myclients','My Clients','clients'],
+    ['othertasks','Other Tasks','clock'],
   ];
   return [
     ['dashboard','My Pending Tasks','clock'],
     ['myclients','My Clients','clients'],
+    ['othertasks','Other Tasks','clock'],
   ];
 }
 function renderSidebar(){
@@ -167,7 +175,7 @@ function renderSidebar(){
 function renderApp(){
   const titleMap = {
     dashboard: session.role==='designer' ? 'My Pending Tasks' : 'Dashboard',
-    managers:'Managers', designers:'Designers', clients:'Clients', alltasks:'All Tasks', myclients:'My Clients'
+    managers:'Managers', designers:'Designers', clients:'Clients', alltasks:'All Tasks', myclients:'My Clients', othertasks:'Other Tasks'
   };
   return `
   <div class="app ${ui.navOpen?'nav-open':''}">
@@ -194,6 +202,7 @@ function renderTab(){
   if(ui.tab==='clients') return renderAdminClients();
   if(ui.tab==='alltasks') return renderAllTasks();
   if(ui.tab==='myclients') return ui.clientId ? renderClientDetail(ui.clientId) : renderMyClients();
+  if(ui.tab==='othertasks') return renderOtherTasks();
   return '';
 }
 
@@ -457,6 +466,63 @@ function renderClientDetail(clientId){
   `;
 }
 
+/* ============================= OTHER TASKS (ad-hoc, cross-client) ============================= */
+function eligibleAssignees(){
+  // Admin can hand a task to any manager or designer. A manager can only hand tasks to designers.
+  if(session.role==='admin') return DB.users.filter(u=>u.role==='manager' || u.role==='designer');
+  if(session.role==='manager') return DB.users.filter(u=>u.role==='designer');
+  return [];
+}
+function canCreateOtherTasks(){ return session.role==='admin' || session.role==='manager'; }
+
+function renderOtherTasks(){
+  const canCreate = canCreateOtherTasks();
+  let list = [...DB.otherTasks];
+  if(ui.otherTaskFilter==='pending') list = list.filter(t=>t.status!=='Completed');
+  if(ui.otherTaskFilter==='completed') list = list.filter(t=>t.status==='Completed');
+  if(ui.otherTaskFilter==='overdue') list = list.filter(t=>t.status!=='Completed' && daysDiff(t.deadline)<0);
+  list.sort((a,b)=> (a.status==='Completed')-(b.status==='Completed') || (a.deadline||'').localeCompare(b.deadline||''));
+
+  const rows = list.map(t=>{
+    const by = userById(t.assignedById); const to = userById(t.assignedToId);
+    const isOwner = session.role==='admin' || t.assignedById===session.id;
+    const isAssignee = t.assignedToId===session.id;
+    return `<tr class="row-hover">
+      <td><b>${escapeHtml(t.title)}</b>${t.description?`<div class="muted" style="font-size:12px; margin-top:2px;">${escapeHtml(t.description)}</div>`:''}</td>
+      <td>${priorityPill(t.priority)}</td>
+      <td>${deadlineTag(t)}</td>
+      <td>${to?escapeHtml(to.name):'—'}</td>
+      <td>${by?escapeHtml(by.name):'—'}</td>
+      <td>${statusPill(t)}</td>
+      <td>${t.hasAttachment? `<a class="btn btn-sm btn-ghost" href="/api/other-tasks/${t.id}/attachment">📎 ${escapeHtml(t.attachmentName||'File')}</a>` : '<span class="muted">—</span>'}</td>
+      <td style="white-space:nowrap;">
+        ${isAssignee && t.status!=='Completed' ? `<button class="btn btn-sm btn-accent" data-action="completeother" data-id="${t.id}">Mark complete</button>` : ''}
+        ${isOwner ? `<button class="btn btn-sm btn-ghost" data-action="editother" data-id="${t.id}">Edit</button> <button class="btn btn-sm btn-danger" data-action="deleteother" data-id="${t.id}">Delete</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div class="panel">
+    <div class="panel-head" style="flex-wrap:wrap; gap:10px;">
+      <h3>Other tasks (${list.length})</h3>
+      <div class="toolbar">
+        <select id="otherTaskFilter">
+          <option value="all" ${ui.otherTaskFilter==='all'?'selected':''}>All statuses</option>
+          <option value="pending" ${ui.otherTaskFilter==='pending'?'selected':''}>Pending</option>
+          <option value="overdue" ${ui.otherTaskFilter==='overdue'?'selected':''}>Overdue</option>
+          <option value="completed" ${ui.otherTaskFilter==='completed'?'selected':''}>Completed</option>
+        </select>
+        ${canCreate ? `<button class="btn btn-primary btn-sm" data-action="newother">+ Assign task</button>` : ''}
+      </div>
+    </div>
+    <div class="panel-body pad0">
+      ${list.length ? `<table><thead><tr><th>Task</th><th>Priority</th><th>Deadline</th><th>Assigned to</th><th>Assigned by</th><th>Status</th><th>Attachment</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+      : `<div class="empty-state"><b>Nothing here yet</b>${canCreate? 'Assign a one-off task to get started.' : 'Tasks assigned to you will show up here.'}</div>`}
+    </div>
+  </div>`;
+}
+
 /* ============================= MODALS ============================= */
 function renderModal(){
   if(modal.type==='newuser') return modalNewUser();
@@ -465,6 +531,8 @@ function renderModal(){
   if(modal.type==='changepw') return modalChangePw();
   if(modal.type==='newtask') return modalTaskForm();
   if(modal.type==='edittask') return modalTaskForm(true);
+  if(modal.type==='newother') return modalOtherTaskForm();
+  if(modal.type==='editother') return modalOtherTaskForm(true);
   if(modal.type==='importresult') return modalImportResult();
   return '';
 }
@@ -563,6 +631,35 @@ function modalTaskForm(isEdit){
     </div>
   </div>`;
 }
+function modalOtherTaskForm(isEdit){
+  const t = isEdit ? DB.otherTasks.find(x=>x.id===modal.payload.id) : null;
+  const v = (f, d)=> t ? (t[f]!=null?t[f]:'') : (d||'');
+  const assignees = eligibleAssignees();
+  return `<div class="modal-overlay" data-action="closemodal">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head"><h3>${isEdit?'Edit task':'Assign a task'}</h3><button class="modal-close" data-action="closemodal">&times;</button></div>
+      <form id="otherTaskForm">
+      <div class="modal-body">
+        ${modal.payload.err?`<div class="error-msg">${escapeHtml(modal.payload.err)}</div>`:''}
+        <div class="field"><label>Title</label><input name="title" value="${escapeHtml(v('title'))}" required /></div>
+        <div class="field"><label>Description</label><textarea name="description" rows="3">${escapeHtml(v('description'))}</textarea></div>
+        <div class="grid-2">
+          <div class="field"><label>Priority</label><select name="priority">${PRIORITIES_JS.map(p=>`<option ${v('priority','Medium')===p?'selected':''}>${p}</option>`).join('')}</select></div>
+          <div class="field"><label>Deadline</label><input type="date" name="deadline" value="${v('deadline')}" required /></div>
+        </div>
+        <div class="field"><label>Assign to</label>
+          <select name="assignedToId" required>
+            <option value="">Select a person</option>
+            ${assignees.map(u=>`<option value="${u.id}" ${v('assignedToId')===u.id?'selected':''}>${escapeHtml(u.name)} (${u.role})</option>`).join('')}
+          </select>
+        </div>
+        ${!isEdit ? `<div class="field"><label>Attach file (optional, up to 5 MB)</label><input type="file" name="file" /></div>` : `<div class="disclose">To change the attached file, delete this task and assign a new one.</div>`}
+      </div>
+      <div class="modal-foot"><button type="button" class="btn btn-ghost" data-action="closemodal">Cancel</button><button type="submit" class="btn btn-primary">${isEdit?'Save changes':'Assign task'}</button></div>
+      </form>
+    </div>
+  </div>`;
+}
 function modalImportResult(){
   const {added, skipped, error, skippedRows, detectedHeaders} = modal.payload;
   if(error){
@@ -611,7 +708,7 @@ function bindEvents(){
       try{
         await apiPost('/api/login', {username: fd.get('username').trim(), password: fd.get('password')});
         await refreshState();
-        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', dashboardFilter:null};
+        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', dashboardFilter:null, otherTaskFilter:'all'};
         render();
       }catch(err){
         ui.loginErr = err.message; ui.loginBusy = false; render();
@@ -636,6 +733,20 @@ function bindEvents(){
   root.querySelectorAll('[data-action="changepw"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'changepw', payload:{}}; render(); }));
   root.querySelectorAll('[data-action="newtask"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newtask', payload:{clientId:Number(el.getAttribute('data-id'))}}; render(); }));
   root.querySelectorAll('[data-action="edittask"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'edittask', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
+
+  root.querySelectorAll('[data-action="newother"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newother', payload:{}}; render(); }));
+  root.querySelectorAll('[data-action="editother"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'editother', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
+  root.querySelectorAll('[data-action="deleteother"]').forEach(el=> el.addEventListener('click', async ()=>{
+    if(!confirm('Delete this task?')) return;
+    try{ await apiDelete(`/api/other-tasks/${el.getAttribute('data-id')}`); await refreshState(); showToast('Task deleted'); render(); }
+    catch(err){ showToast(err.message); }
+  }));
+  root.querySelectorAll('[data-action="completeother"]').forEach(el=> el.addEventListener('click', async ()=>{
+    try{ await apiPatch(`/api/other-tasks/${el.getAttribute('data-id')}`, {status:'Completed'}); await refreshState(); showToast('Marked as completed'); render(); }
+    catch(err){ showToast(err.message); }
+  }));
+  const otherTaskFilter = document.getElementById('otherTaskFilter');
+  if(otherTaskFilter) otherTaskFilter.addEventListener('change', ()=>{ ui.otherTaskFilter = otherTaskFilter.value; render(); });
 
   root.querySelectorAll('[data-action="openclient"]').forEach(el=> el.addEventListener('click', ()=>{ ui.clientId = Number(el.getAttribute('data-id')); render(); }));
   root.querySelectorAll('[data-action="viewclient"]').forEach(el=> el.addEventListener('click', ()=>{ ui.tab='myclients'; ui.clientId = Number(el.getAttribute('data-id')); render(); }));
@@ -747,6 +858,27 @@ function bindEvents(){
       }
       await refreshState(); modal=null; showToast('Task saved'); render();
     }catch(err){ showToast(err.message); }
+  });
+
+  const otherTaskForm = document.getElementById('otherTaskForm');
+  if(otherTaskForm) otherTaskForm.addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(otherTaskForm);
+    try{
+      if(modal.type==='editother'){
+        const payload = {
+          title: fd.get('title'), description: fd.get('description'), priority: fd.get('priority'),
+          deadline: fd.get('deadline'), assignedToId: fd.get('assignedToId'),
+        };
+        await apiPatch(`/api/other-tasks/${modal.payload.id}`, payload);
+        await refreshState(); modal=null; showToast('Task updated'); render();
+      } else {
+        const res = await fetch('/api/other-tasks', {method:'POST', body:fd, credentials:'same-origin'});
+        const data = await res.json();
+        if(!res.ok){ modal.payload.err = data.error || 'Could not assign task.'; render(); return; }
+        await refreshState(); modal=null; showToast('Task assigned'); render();
+      }
+    }catch(err){ modal.payload.err = err.message; render(); }
   });
 }
 
