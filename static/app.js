@@ -24,7 +24,7 @@ const POSTING_TYPES = ['Story','Feed'];
 
 let DB = { users: [], clients: [], tasks: [] };
 let session = null;
-let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', loginErr:null, loginBusy:false };
+let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', dashboardFilter:null, loginErr:null, loginBusy:false };
 let modal = null;
 let toastMsg = null;
 
@@ -45,8 +45,8 @@ async function refreshState(){
 /* ============================= DERIVED HELPERS ============================= */
 function clientsForUser(){
   if(session.role==='admin') return DB.clients;
-  if(session.role==='manager') return DB.clients.filter(c=>c.managerId===session.id);
-  if(session.role==='designer') return DB.clients.filter(c=>c.designerId===session.id);
+  if(session.role==='manager') return DB.clients.filter(c=>c.managerIds.includes(session.id));
+  if(session.role==='designer') return DB.clients.filter(c=>c.designerIds.includes(session.id));
   return [];
 }
 function tasksForClient(clientId){ return DB.tasks.filter(t=>t.clientId===clientId); }
@@ -58,6 +58,13 @@ function userById(id){ return DB.users.find(u=>u.id===id); }
 function clientById(id){ return DB.clients.find(c=>c.id===id); }
 function managerList(){ return DB.users.filter(u=>u.role==='manager'); }
 function designerList(){ return DB.users.filter(u=>u.role==='designer'); }
+function namesForIds(ids){ return (ids||[]).map(id=>userById(id)).filter(Boolean).map(u=>u.name); }
+
+// Every task belonging to any client this manager/designer is assigned to.
+function tasksForAssignee(userId, role){
+  const clientIds = DB.clients.filter(c => role==='manager' ? c.managerIds.includes(userId) : c.designerIds.includes(userId)).map(c=>c.id);
+  return DB.tasks.filter(t=>clientIds.includes(t.clientId));
+}
 
 function statusPill(task){
   if(task.status==='Completed') return '<span class="pill pill-completed">Completed</span>';
@@ -118,7 +125,8 @@ const ICONS = {
   clients:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h6"/></svg>',
   tasks:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l2 2 4-4"/><rect x="3" y="3" width="18" height="18" rx="2.5"/></svg>',
   logout:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
-  clock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>'
+  clock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
+  key:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="M11 12 20 3M20 3h-4M20 3v4"/></svg>'
 };
 function navItemsFor(role){
   if(role==='admin') return [
@@ -149,6 +157,7 @@ function renderSidebar(){
     <div>${items}</div>
     <div class="sidebar-foot">
       <div class="who"><b>${escapeHtml(session.name)}</b>${escapeHtml(session.username)}<span class="badge-role">${roleLabel}</span></div>
+      <div class="nav-item" data-action="changepw">${ICONS.key}<span>Change password</span></div>
       <div class="nav-item" data-action="logout">${ICONS.logout}<span>Log out</span></div>
     </div>
   </div>`;
@@ -201,17 +210,17 @@ function renderDashboard(){
       <div class="stat-card"><div class="num">${managerList().length}</div><div class="lbl">Managers</div></div>
       <div class="stat-card"><div class="num">${designerList().length}</div><div class="lbl">Designers</div></div>
       <div class="stat-card"><div class="num">${DB.clients.length}</div><div class="lbl">Clients</div></div>
-      <div class="stat-card primary"><div class="num">${pending}</div><div class="lbl">Pending tasks</div></div>
-      <div class="stat-card success"><div class="num">${completed}</div><div class="lbl">Completed tasks</div></div>
-      <div class="stat-card danger"><div class="num">${overdue}</div><div class="lbl">Overdue</div></div>
+      <div class="stat-card primary clickable" data-action="gotoalltasks" data-filter="pending"><div class="num">${pending}</div><div class="lbl">Pending tasks</div></div>
+      <div class="stat-card success clickable" data-action="gotoalltasks" data-filter="completed"><div class="num">${completed}</div><div class="lbl">Completed tasks</div></div>
+      <div class="stat-card danger clickable" data-action="gotoalltasks" data-filter="overdue"><div class="num">${overdue}</div><div class="lbl">Overdue</div></div>
     </div>
     <div class="panel">
       <div class="panel-head"><h3>Recently added clients</h3><span class="breadcrumb-link" data-nav="clients">View all clients →</span></div>
       <div class="panel-body pad0">
-        ${recentClients.length ? `<table><thead><tr><th>Client</th><th>Manager</th><th>Designer</th><th>Tasks</th></tr></thead><tbody>
+        ${recentClients.length ? `<table><thead><tr><th>Client</th><th>Managers</th><th>Designers</th><th>Tasks</th></tr></thead><tbody>
           ${recentClients.map(c=>{
-            const mgr = userById(c.managerId); const des = userById(c.designerId);
-            return `<tr class="row-hover"><td><b>${escapeHtml(c.name)}</b></td><td>${mgr?escapeHtml(mgr.name):'<span class="muted">Unassigned</span>'}</td><td>${des?escapeHtml(des.name):'<span class="muted">Unassigned</span>'}</td><td>${tasksForClient(c.id).length}</td></tr>`;
+            const mgrNames = namesForIds(c.managerIds); const desNames = namesForIds(c.designerIds);
+            return `<tr class="row-hover"><td><b>${escapeHtml(c.name)}</b></td><td>${mgrNames.length?escapeHtml(mgrNames.join(', ')):'<span class="muted">Unassigned</span>'}</td><td>${desNames.length?escapeHtml(desNames.join(', ')):'<span class="muted">Unassigned</span>'}</td><td>${tasksForClient(c.id).length}</td></tr>`;
           }).join('')}
         </tbody></table>` : `<div class="empty-state"><b>No clients yet</b>Create your first client from the Clients tab.</div>`}
       </div>
@@ -220,20 +229,42 @@ function renderDashboard(){
   if(session.role==='manager'){
     const myClients = clientsForUser();
     const myTasks = tasksForUser();
+    const totalCount = myTasks.length;
     const pending = myTasks.filter(t=>t.status!=='Completed').length;
     const completed = myTasks.filter(t=>t.status==='Completed').length;
     const overdue = myTasks.filter(t=>t.status!=='Completed' && daysDiff(t.deadline)<0).length;
-    const upcoming = myTasks.filter(t=>t.status!=='Completed').sort((a,b)=>(a.deadline||'').localeCompare(b.deadline||'')).slice(0,8);
+
+    const filterFns = {
+      all: t=>true,
+      pending: t=>t.status!=='Completed',
+      overdue: t=>t.status!=='Completed' && daysDiff(t.deadline)<0,
+      completed: t=>t.status==='Completed',
+    };
+    const filterLabels = { all:'All tasks', pending:'Pending tasks', overdue:'Overdue tasks', completed:'Completed tasks' };
+
+    let panelTitle, listRows;
+    if(ui.dashboardFilter && filterFns[ui.dashboardFilter]){
+      panelTitle = filterLabels[ui.dashboardFilter];
+      listRows = myTasks.filter(filterFns[ui.dashboardFilter]).sort((a,b)=>(a.deadline||'').localeCompare(b.deadline||''));
+    } else {
+      panelTitle = 'Upcoming deadlines';
+      listRows = myTasks.filter(t=>t.status!=='Completed').sort((a,b)=>(a.deadline||'').localeCompare(b.deadline||'')).slice(0,8);
+    }
+
     return `
     <div class="stat-grid">
       <div class="stat-card"><div class="num">${myClients.length}</div><div class="lbl">My clients</div></div>
-      <div class="stat-card primary"><div class="num">${pending}</div><div class="lbl">Pending tasks</div></div>
-      <div class="stat-card success"><div class="num">${completed}</div><div class="lbl">Completed</div></div>
-      <div class="stat-card danger"><div class="num">${overdue}</div><div class="lbl">Overdue</div></div>
+      <div class="stat-card clickable ${ui.dashboardFilter==='all'?'active-stat':''}" data-action="dashfilter" data-filter="all"><div class="num">${totalCount}</div><div class="lbl">All tasks</div></div>
+      <div class="stat-card primary clickable ${ui.dashboardFilter==='pending'?'active-stat':''}" data-action="dashfilter" data-filter="pending"><div class="num">${pending}</div><div class="lbl">Pending tasks</div></div>
+      <div class="stat-card danger clickable ${ui.dashboardFilter==='overdue'?'active-stat':''}" data-action="dashfilter" data-filter="overdue"><div class="num">${overdue}</div><div class="lbl">Overdue tasks</div></div>
+      <div class="stat-card success clickable ${ui.dashboardFilter==='completed'?'active-stat':''}" data-action="dashfilter" data-filter="completed"><div class="num">${completed}</div><div class="lbl">Completed tasks</div></div>
     </div>
     <div class="panel">
-      <div class="panel-head"><h3>Upcoming deadlines</h3><span class="breadcrumb-link" data-nav="myclients">Go to my clients →</span></div>
-      <div class="panel-body pad0">${renderTaskTableRows(upcoming, false, false, true)}</div>
+      <div class="panel-head">
+        <h3>${panelTitle}</h3>
+        ${ui.dashboardFilter ? `<span class="breadcrumb-link" data-action="cleardashfilter">← Back to upcoming deadlines</span>` : `<span class="breadcrumb-link" data-nav="myclients">Go to my clients →</span>`}
+      </div>
+      <div class="panel-body pad0">${renderTaskTableRows(listRows, false, false, true)}</div>
     </div>`;
   }
   return '';
@@ -290,13 +321,19 @@ function renderUserList(role){
   <div class="panel">
     <div class="panel-head"><h3>${label}s (${list.length})</h3><button class="btn btn-primary btn-sm" data-action="newuser" data-role="${role}">+ Add ${label}</button></div>
     <div class="panel-body pad0">
-      ${list.length? `<table><thead><tr><th>Name</th><th>Username</th><th>Assigned clients</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.length? `<table><thead><tr><th>Name</th><th>Username</th><th>Clients</th><th>Total tasks</th><th>Pending</th><th>Overdue</th><th>Status</th><th></th></tr></thead><tbody>
         ${list.map(u=>{
-          const cnt = DB.clients.filter(c=> role==='manager' ? c.managerId===u.id : c.designerId===u.id).length;
+          const cnt = DB.clients.filter(c=> role==='manager' ? c.managerIds.includes(u.id) : c.designerIds.includes(u.id)).length;
+          const stats = tasksForAssignee(u.id, role);
+          const pending = stats.filter(t=>t.status!=='Completed').length;
+          const overdue = stats.filter(t=>t.status!=='Completed' && daysDiff(t.deadline)<0).length;
           return `<tr class="row-hover">
             <td><b>${escapeHtml(u.name)}</b></td>
             <td class="mono">${escapeHtml(u.username)}</td>
             <td>${cnt}</td>
+            <td>${stats.length}</td>
+            <td>${pending}</td>
+            <td style="${overdue?'color:var(--danger); font-weight:600;':''}">${overdue}</td>
             <td>${u.active===false? '<span class="pill pill-neutral">Inactive</span>' : '<span class="pill pill-completed">Active</span>'}</td>
             <td style="white-space:nowrap;">
               <button class="btn btn-sm btn-ghost" data-action="resetpw" data-id="${u.id}">Reset password</button>
@@ -315,22 +352,20 @@ function renderAdminClients(){
   <div class="panel">
     <div class="panel-head"><h3>All clients (${DB.clients.length})</h3><button class="btn btn-primary btn-sm" data-action="newclient">+ Add client</button></div>
     <div class="panel-body pad0">
-      ${DB.clients.length? `<table><thead><tr><th>Client</th><th>Manager</th><th>Designer</th><th>Tasks</th><th>Pending</th><th></th></tr></thead><tbody>
+      ${DB.clients.length? `<table><thead><tr><th>Client</th><th>Managers</th><th>Designers</th><th>Tasks</th><th>Pending</th><th></th></tr></thead><tbody>
         ${DB.clients.map(c=>{
           const t = tasksForClient(c.id);
           const pending = t.filter(x=>x.status!=='Completed').length;
           return `<tr class="row-hover">
             <td><b>${escapeHtml(c.name)}</b></td>
             <td>
-              <select class="mgr-select" data-client="${c.id}" data-field="managerId">
-                <option value="">Unassigned</option>
-                ${managerList().map(m=>`<option value="${m.id}" ${c.managerId===m.id?'selected':''}>${escapeHtml(m.name)}</option>`).join('')}
+              <select class="multi-select" multiple size="${Math.min(Math.max(managerList().length,2),4)}" data-client="${c.id}" data-field="managerIds">
+                ${managerList().map(m=>`<option value="${m.id}" ${c.managerIds.includes(m.id)?'selected':''}>${escapeHtml(m.name)}</option>`).join('')}
               </select>
             </td>
             <td>
-              <select class="des-select" data-client="${c.id}" data-field="designerId">
-                <option value="">Unassigned</option>
-                ${designerList().map(d=>`<option value="${d.id}" ${c.designerId===d.id?'selected':''}>${escapeHtml(d.name)}</option>`).join('')}
+              <select class="multi-select" multiple size="${Math.min(Math.max(designerList().length,2),4)}" data-client="${c.id}" data-field="designerIds">
+                ${designerList().map(d=>`<option value="${d.id}" ${c.designerIds.includes(d.id)?'selected':''}>${escapeHtml(d.name)}</option>`).join('')}
               </select>
             </td>
             <td>${t.length}</td>
@@ -341,8 +376,9 @@ function renderAdminClients(){
             </td>
           </tr>`;
         }).join('')}
-      </tbody></table>` : `<div class="empty-state"><b>No clients yet</b>Add a client, then assign a manager and designer.</div>`}
+      </tbody></table>` : `<div class="empty-state"><b>No clients yet</b>Add a client, then assign managers and designers.</div>`}
     </div>
+    <div class="panel-body" style="border-top:1px solid var(--line);"><span class="disclose">Hold Ctrl (Windows) or ⌘ (Mac) while clicking to select or deselect multiple managers/designers for a client.</span></div>
   </div>`;
 }
 function renderAllTasks(){
@@ -380,11 +416,11 @@ function renderMyClients(){
       const t = tasksForClient(c.id);
       const pending = t.filter(x=>x.status!=='Completed').length;
       const overdue = t.filter(x=>x.status!=='Completed' && daysDiff(x.deadline)<0).length;
-      const other = session.role==='manager' ? userById(c.designerId) : userById(c.managerId);
-      const otherLabel = session.role==='manager' ? 'Designer' : 'Manager';
+      const otherNames = session.role==='manager' ? namesForIds(c.designerIds) : namesForIds(c.managerIds);
+      const otherLabel = session.role==='manager' ? 'Designers' : 'Managers';
       return `<div class="client-card" data-action="openclient" data-id="${c.id}">
         <h4>${escapeHtml(c.name)}</h4>
-        <div class="sub">${otherLabel}: ${other? escapeHtml(other.name) : 'Unassigned'}</div>
+        <div class="sub">${otherLabel}: ${otherNames.length? escapeHtml(otherNames.join(', ')) : 'Unassigned'}</div>
         <div class="mini-stats">
           <span><b>${t.length}</b> tasks</span>
           <span><b>${pending}</b> pending</span>
@@ -400,14 +436,14 @@ function renderClientDetail(clientId){
   if(!c) return `<div class="empty-state"><b>Client not found</b></div>`;
   const tasks = [...tasksForClient(clientId)].sort((a,b)=>(a.deadline||'').localeCompare(b.deadline||''));
   const isManager = session.role==='manager' || session.role==='admin';
-  const mgr = userById(c.managerId); const des = userById(c.designerId);
+  const mgrNames = namesForIds(c.managerIds); const desNames = namesForIds(c.designerIds);
   return `
   <div style="margin-bottom:14px;"><span class="breadcrumb-link" data-nav="myclients">← All clients</span></div>
   <div class="panel">
     <div class="panel-head" style="flex-wrap:wrap; gap:10px;">
       <div>
         <h3>${escapeHtml(c.name)}</h3>
-        <div class="path" style="margin-top:4px;">Manager: ${mgr?escapeHtml(mgr.name):'—'} · Designer: ${des?escapeHtml(des.name):'—'}</div>
+        <div class="path" style="margin-top:4px;">Managers: ${mgrNames.length?escapeHtml(mgrNames.join(', ')):'—'} · Designers: ${desNames.length?escapeHtml(desNames.join(', ')):'—'}</div>
       </div>
       ${isManager ? `<div class="toolbar">
         <a class="btn btn-ghost btn-sm" href="/api/template.xlsx">Download Excel template</a>
@@ -426,6 +462,7 @@ function renderModal(){
   if(modal.type==='newuser') return modalNewUser();
   if(modal.type==='newclient') return modalNewClient();
   if(modal.type==='resetpw') return modalResetPw();
+  if(modal.type==='changepw') return modalChangePw();
   if(modal.type==='newtask') return modalTaskForm();
   if(modal.type==='edittask') return modalTaskForm(true);
   if(modal.type==='importresult') return modalImportResult();
@@ -457,12 +494,13 @@ function modalNewClient(){
       <div class="modal-body">
         ${modal.payload.err?`<div class="error-msg">${escapeHtml(modal.payload.err)}</div>`:''}
         <div class="field"><label>Client name</label><input name="name" required /></div>
-        <div class="field"><label>Assign manager</label>
-          <select name="managerId"><option value="">Unassigned for now</option>${managerList().map(m=>`<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('')}</select>
+        <div class="field"><label>Assign manager(s)</label>
+          <select name="managerIds" multiple size="${Math.min(Math.max(managerList().length,2),5)}">${managerList().map(m=>`<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('')}</select>
         </div>
-        <div class="field"><label>Assign designer</label>
-          <select name="designerId"><option value="">Unassigned for now</option>${designerList().map(d=>`<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('')}</select>
+        <div class="field"><label>Assign designer(s)</label>
+          <select name="designerIds" multiple size="${Math.min(Math.max(designerList().length,2),5)}">${designerList().map(d=>`<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('')}</select>
         </div>
+        <div class="disclose">Hold Ctrl (Windows) or ⌘ (Mac) to select more than one.</div>
       </div>
       <div class="modal-foot"><button type="button" class="btn btn-ghost" data-action="closemodal">Cancel</button><button type="submit" class="btn btn-primary">Create client</button></div>
       </form>
@@ -480,6 +518,22 @@ function modalResetPw(){
         <div class="field"><label>New password</label><input name="password" required /></div>
       </div>
       <div class="modal-foot"><button type="button" class="btn btn-ghost" data-action="closemodal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
+      </form>
+    </div>
+  </div>`;
+}
+function modalChangePw(){
+  return `<div class="modal-overlay" data-action="closemodal">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head"><h3>Change your password</h3><button class="modal-close" data-action="closemodal">&times;</button></div>
+      <form id="changePwForm">
+      <div class="modal-body">
+        ${modal.payload.err?`<div class="error-msg">${escapeHtml(modal.payload.err)}</div>`:''}
+        <div class="field"><label>Current password</label><input type="password" name="currentPassword" required /></div>
+        <div class="field"><label>New password</label><input type="password" name="newPassword" required /></div>
+        <div class="field"><label>Confirm new password</label><input type="password" name="confirmPassword" required /></div>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn btn-ghost" data-action="closemodal">Cancel</button><button type="submit" class="btn btn-primary">Update password</button></div>
       </form>
     </div>
   </div>`;
@@ -557,7 +611,7 @@ function bindEvents(){
       try{
         await apiPost('/api/login', {username: fd.get('username').trim(), password: fd.get('password')});
         await refreshState();
-        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all'};
+        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', dashboardFilter:null};
         render();
       }catch(err){
         ui.loginErr = err.message; ui.loginBusy = false; render();
@@ -579,11 +633,22 @@ function bindEvents(){
   root.querySelectorAll('[data-action="newuser"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newuser', payload:{role:el.getAttribute('data-role')}}; render(); }));
   root.querySelectorAll('[data-action="newclient"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newclient', payload:{}}; render(); }));
   root.querySelectorAll('[data-action="resetpw"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'resetpw', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
+  root.querySelectorAll('[data-action="changepw"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'changepw', payload:{}}; render(); }));
   root.querySelectorAll('[data-action="newtask"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newtask', payload:{clientId:Number(el.getAttribute('data-id'))}}; render(); }));
   root.querySelectorAll('[data-action="edittask"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'edittask', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
 
   root.querySelectorAll('[data-action="openclient"]').forEach(el=> el.addEventListener('click', ()=>{ ui.clientId = Number(el.getAttribute('data-id')); render(); }));
   root.querySelectorAll('[data-action="viewclient"]').forEach(el=> el.addEventListener('click', ()=>{ ui.tab='myclients'; ui.clientId = Number(el.getAttribute('data-id')); render(); }));
+
+  root.querySelectorAll('[data-action="dashfilter"]').forEach(el=> el.addEventListener('click', ()=>{
+    const f = el.getAttribute('data-filter');
+    ui.dashboardFilter = ui.dashboardFilter===f ? null : f;
+    render();
+  }));
+  root.querySelectorAll('[data-action="cleardashfilter"]').forEach(el=> el.addEventListener('click', ()=>{ ui.dashboardFilter=null; render(); }));
+  root.querySelectorAll('[data-action="gotoalltasks"]').forEach(el=> el.addEventListener('click', ()=>{
+    ui.tab='alltasks'; ui.taskFilter = el.getAttribute('data-filter'); ui.taskClientFilter='all'; render();
+  }));
 
   root.querySelectorAll('[data-action="toggleactive"]').forEach(el=> el.addEventListener('click', async ()=>{
     try{
@@ -606,10 +671,11 @@ function bindEvents(){
     catch(err){ showToast(err.message); }
   }));
 
-  root.querySelectorAll('.mgr-select, .des-select').forEach(el=> el.addEventListener('change', async ()=>{
+  root.querySelectorAll('select.multi-select').forEach(el=> el.addEventListener('change', async ()=>{
     const field = el.getAttribute('data-field');
+    const values = Array.from(el.selectedOptions).map(o=>o.value);
     try{
-      await apiPatch(`/api/clients/${el.getAttribute('data-client')}`, {[field]: el.value || null});
+      await apiPatch(`/api/clients/${el.getAttribute('data-client')}`, {[field]: values});
       await refreshState(); showToast('Assignment updated'); render();
     }catch(err){ showToast(err.message); render(); }
   }));
@@ -636,9 +702,11 @@ function bindEvents(){
   const newClientForm = document.getElementById('newClientForm');
   if(newClientForm) newClientForm.addEventListener('submit', async e=>{
     e.preventDefault();
-    const fd = new FormData(newClientForm);
+    const managerIds = Array.from(newClientForm.querySelector('[name="managerIds"]').selectedOptions).map(o=>o.value);
+    const designerIds = Array.from(newClientForm.querySelector('[name="designerIds"]').selectedOptions).map(o=>o.value);
+    const name = new FormData(newClientForm).get('name').trim();
     try{
-      await apiPost('/api/clients', {name: fd.get('name').trim(), managerId: fd.get('managerId')||null, designerId: fd.get('designerId')||null});
+      await apiPost('/api/clients', {name, managerIds, designerIds});
       await refreshState(); modal=null; showToast('Client created'); render();
     }catch(err){ modal.payload.err = err.message; render(); }
   });
@@ -649,6 +717,18 @@ function bindEvents(){
     const fd = new FormData(resetPwForm);
     try{
       await apiPost(`/api/users/${modal.payload.id}/reset-password`, {password: fd.get('password')});
+      modal=null; showToast('Password updated'); render();
+    }catch(err){ modal.payload.err = err.message; render(); }
+  });
+
+  const changePwForm = document.getElementById('changePwForm');
+  if(changePwForm) changePwForm.addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(changePwForm);
+    const newPw = fd.get('newPassword'); const confirmPw = fd.get('confirmPassword');
+    if(newPw !== confirmPw){ modal.payload.err = 'New password and confirmation do not match.'; render(); return; }
+    try{
+      await apiPost('/api/me/change-password', {currentPassword: fd.get('currentPassword'), newPassword: newPw});
       modal=null; showToast('Password updated'); render();
     }catch(err){ modal.payload.err = err.message; render(); }
   });
