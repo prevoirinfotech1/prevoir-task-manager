@@ -25,7 +25,7 @@ const PRIORITIES_JS = ['High','Medium','Low'];
 
 let DB = { users: [], clients: [], tasks: [], otherTasks: [] };
 let session = null;
-let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomDate:'', loginErr:null, loginBusy:false };
+let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:'', loginErr:null, loginBusy:false };
 let modal = null;
 let toastMsg = null;
 
@@ -288,26 +288,41 @@ function renderDashboard(){
   return '';
 }
 function tomorrowISO(){ const d=new Date(); d.setDate(d.getDate()+1); return d.toISOString().slice(0,10); }
-function selectedDesignerDate(){
-  if(ui.designerDateFilter==='tomorrow') return tomorrowISO();
-  if(ui.designerDateFilter==='custom') return ui.designerCustomDate || todayISO();
-  return todayISO();
+function selectedDesignerRange(){
+  if(ui.designerDateFilter==='tomorrow'){ const t=tomorrowISO(); return {from:t, to:t}; }
+  if(ui.designerDateFilter==='custom'){
+    const from = ui.designerCustomFrom || todayISO();
+    const to = ui.designerCustomTo || from;
+    return to < from ? {from:to, to:from} : {from, to};
+  }
+  const t = todayISO(); return {from:t, to:t};
 }
 function renderDesignerPending(){
   const allMyTasks = tasksForUser().filter(t=>t.status!=='Completed');
   const overdue = allMyTasks.filter(t=>daysDiff(t.deadline)<0).length;
-  const myOtherTasks = DB.otherTasks.filter(t=>t.assignedToId===session.id);
+  const myOtherTasks = DB.otherTasks.filter(t=>t.assignedToId===session.id && t.status!=='Completed');
 
-  const selectedDate = selectedDesignerDate();
-  const dueClientTasks = allMyTasks.filter(t=>t.deadline===selectedDate).map(t=>Object.assign({_kind:'client'}, t));
-  const dueOtherTasks = myOtherTasks.filter(t=>t.status!=='Completed' && t.deadline===selectedDate).map(t=>Object.assign({_kind:'other'}, t));
+  const range = selectedDesignerRange();
+  const inRange = (d)=> d>=range.from && d<=range.to;
+
+  const inRangeClientTasks = allMyTasks.filter(t=>inRange(t.deadline));
+  // Urgent tasks are pinned into this stack regardless of their own deadline,
+  // the same way Other Tasks are pulled in — so nothing urgent gets buried.
+  const pinnedUrgentTasks = allMyTasks.filter(t=>t.isUrgent && !inRange(t.deadline));
+  const dueClientTasks = [...inRangeClientTasks, ...pinnedUrgentTasks].map(t=>Object.assign({_kind:'client', _pinned: pinnedUrgentTasks.includes(t)}, t));
+
+  const dueOtherTasks = myOtherTasks.filter(t=>inRange(t.deadline)).map(t=>Object.assign({_kind:'other', _pinned:false}, t));
+
   const combined = [...dueClientTasks, ...dueOtherTasks].sort((a,b)=>{
     const aUrgent = a._kind==='client' ? (a.isUrgent?0:1) : (a.priority==='High'?0:1);
     const bUrgent = b._kind==='client' ? (b.isUrgent?0:1) : (b.priority==='High'?0:1);
-    return aUrgent - bUrgent;
+    if(aUrgent!==bUrgent) return aUrgent - bUrgent;
+    return (a.deadline||'').localeCompare(b.deadline||'');
   });
 
-  const dateLabel = ui.designerDateFilter==='today' ? "Today's deadline" : ui.designerDateFilter==='tomorrow' ? "Tomorrow's deadline" : `Deadline: ${fmtDate(selectedDate)}`;
+  const rangeLabel = ui.designerDateFilter==='today' ? "Today's deadline" : ui.designerDateFilter==='tomorrow' ? "Tomorrow's deadline"
+    : range.from===range.to ? `Deadline: ${fmtDate(range.from)}` : `Deadline: ${fmtDate(range.from)} – ${fmtDate(range.to)}`;
+  const pinnedCount = pinnedUrgentTasks.length;
 
   return `
   <div class="stat-grid">
@@ -317,12 +332,20 @@ function renderDesignerPending(){
   </div>
   <div class="panel">
     <div class="panel-head" style="flex-wrap:wrap; gap:10px;">
-      <h3>${dateLabel} (${combined.length})</h3>
+      <div>
+        <h3>${rangeLabel} (${combined.length})</h3>
+        ${pinnedCount ? `<div class="path" style="margin-top:2px;">Includes ${pinnedCount} urgent task${pinnedCount>1?'s':''} outside this range</div>` : ''}
+      </div>
       <div class="toolbar">
         <button class="btn btn-sm ${ui.designerDateFilter==='today'?'btn-primary':'btn-ghost'}" data-action="designerdate" data-value="today">Today</button>
         <button class="btn btn-sm ${ui.designerDateFilter==='tomorrow'?'btn-primary':'btn-ghost'}" data-action="designerdate" data-value="tomorrow">Tomorrow</button>
-        <button class="btn btn-sm ${ui.designerDateFilter==='custom'?'btn-primary':'btn-ghost'}" data-action="designerdate" data-value="custom">Custom date</button>
-        ${ui.designerDateFilter==='custom' ? `<input type="date" id="designerCustomDateInput" value="${ui.designerCustomDate||todayISO()}" />` : ''}
+        <button class="btn btn-sm ${ui.designerDateFilter==='custom'?'btn-primary':'btn-ghost'}" data-action="designerdate" data-value="custom">Custom range</button>
+        ${ui.designerDateFilter==='custom' ? `
+          <span class="muted" style="font-size:12.5px;">From</span>
+          <input type="date" id="designerCustomFromInput" value="${ui.designerCustomFrom||todayISO()}" />
+          <span class="muted" style="font-size:12.5px;">To</span>
+          <input type="date" id="designerCustomToInput" value="${ui.designerCustomTo||ui.designerCustomFrom||todayISO()}" />
+        ` : ''}
       </div>
     </div>
     <div class="panel-body pad0">${renderCombinedDueList(combined)}</div>
@@ -333,8 +356,8 @@ function renderDesignerPending(){
   </div>`;
 }
 function renderCombinedDueList(items){
-  if(!items.length) return `<div class="empty-state"><b>Nothing due</b>No client tasks or other tasks are due on this date.</div>`;
-  return `<table><thead><tr><th>Source</th><th>Task</th><th>Client / From</th><th>Priority</th><th>Status</th><th></th></tr></thead><tbody>
+  if(!items.length) return `<div class="empty-state"><b>Nothing due</b>No client tasks or other tasks fall in this range.</div>`;
+  return `<table><thead><tr><th>Source</th><th>Task</th><th>Client / From</th><th>Priority</th><th>Deadline</th><th>Status</th><th></th></tr></thead><tbody>
   ${items.map(it=>{
     if(it._kind==='client'){
       const c = clientById(it.clientId);
@@ -343,6 +366,7 @@ function renderCombinedDueList(items){
         <td><b>${escapeHtml(it.objective||it.caption||'Content task')}</b><div class="muted" style="font-size:12px; margin-top:2px;">${escapeHtml(it.contentType||'')} · ${escapeHtml(it.postingType||'')}</div></td>
         <td>${c?escapeHtml(c.name):'—'}</td>
         <td>${it.isUrgent?'<span class="pill pill-urgent">🔥 Urgent</span>':'<span class="muted">—</span>'}</td>
+        <td>${deadlineTag(it)}${it._pinned?' <span class="muted" style="font-size:11px;">(outside range)</span>':''}</td>
         <td>${statusPill(it)}</td>
         <td><button class="btn btn-sm btn-accent" data-action="complete" data-id="${it.id}">Mark complete</button></td>
       </tr>`;
@@ -353,6 +377,7 @@ function renderCombinedDueList(items){
       <td><b>${escapeHtml(it.title)}</b>${it.description?`<div class="muted" style="font-size:12px; margin-top:2px;">${escapeHtml(it.description)}</div>`:''}</td>
       <td>${by?`From: ${escapeHtml(by.name)}`:'—'}${it.hasAttachment?` · <a href="/api/other-tasks/${it.id}/attachment">📎 ${escapeHtml(it.attachmentName||'File')}</a>`:''}</td>
       <td>${priorityPill(it.priority)}</td>
+      <td>${deadlineTag(it)}</td>
       <td>${statusPill(it)}</td>
       <td><button class="btn btn-sm btn-accent" data-action="completeother" data-id="${it.id}">Mark complete</button></td>
     </tr>`;
@@ -799,7 +824,7 @@ function bindEvents(){
       try{
         await apiPost('/api/login', {username: fd.get('username').trim(), password: fd.get('password')});
         await refreshState();
-        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomDate:''};
+        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:''};
         render();
       }catch(err){
         ui.loginErr = err.message; ui.loginBusy = false; render();
@@ -904,11 +929,13 @@ function bindEvents(){
 
   root.querySelectorAll('[data-action="designerdate"]').forEach(el=> el.addEventListener('click', ()=>{
     ui.designerDateFilter = el.getAttribute('data-value');
-    if(ui.designerDateFilter==='custom' && !ui.designerCustomDate) ui.designerCustomDate = todayISO();
+    if(ui.designerDateFilter==='custom' && !ui.designerCustomFrom){ ui.designerCustomFrom = todayISO(); ui.designerCustomTo = todayISO(); }
     render();
   }));
-  const designerCustomDateInput = document.getElementById('designerCustomDateInput');
-  if(designerCustomDateInput) designerCustomDateInput.addEventListener('change', ()=>{ ui.designerCustomDate = designerCustomDateInput.value; render(); });
+  const designerCustomFromInput = document.getElementById('designerCustomFromInput');
+  if(designerCustomFromInput) designerCustomFromInput.addEventListener('change', ()=>{ ui.designerCustomFrom = designerCustomFromInput.value; render(); });
+  const designerCustomToInput = document.getElementById('designerCustomToInput');
+  if(designerCustomToInput) designerCustomToInput.addEventListener('change', ()=>{ ui.designerCustomTo = designerCustomToInput.value; render(); });
 
   root.querySelectorAll('[data-action="importexcel"]').forEach(el=> el.addEventListener('click', ()=>{ document.getElementById('excelInput').click(); }));
   const excelInput = document.getElementById('excelInput');
