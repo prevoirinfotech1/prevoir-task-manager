@@ -7,7 +7,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_login import (
     LoginManager, login_user, logout_user, login_required, current_user,
 )
-from sqlalchemy import or_
+from sqlalchemy import or_, inspect, text
 from werkzeug.utils import secure_filename
 
 from extensions import db, login_manager
@@ -38,6 +38,7 @@ def create_app():
         db.create_all()
         seed_default_admin()
         migrate_legacy_single_assignments()
+        migrate_add_is_urgent_column()
 
     register_routes(app)
     return app
@@ -83,6 +84,26 @@ def migrate_legacy_single_assignments():
                     changed = True
     if changed:
         db.session.commit()
+
+
+def migrate_add_is_urgent_column():
+    """
+    Earlier deploys created the 'tasks' table without an is_urgent column.
+    db.create_all() only creates missing tables, not missing columns on
+    tables that already exist, so this adds it by hand the first time the
+    app boots against an older database. Safe to run every startup — it's
+    a no-op once the column exists.
+    """
+    try:
+        inspector = inspect(db.engine)
+        if "tasks" not in inspector.get_table_names():
+            return  # brand-new database — db.create_all() already added it correctly
+        columns = [c["name"] for c in inspector.get_columns("tasks")]
+        if "is_urgent" not in columns:
+            db.session.execute(text("ALTER TABLE tasks ADD COLUMN is_urgent BOOLEAN DEFAULT FALSE NOT NULL"))
+            db.session.commit()
+    except Exception:
+        db.session.rollback()
 
 
 @login_manager.user_loader
@@ -390,10 +411,10 @@ def register_routes(app):
 
         editable_fields = [
             "date", "deadline", "contentType", "postingType", "objective",
-            "details", "caption", "reference", "remark", "status",
+            "details", "caption", "reference", "remark", "status", "isUrgent",
         ]
         field_map = {
-            "contentType": "content_type", "postingType": "posting_type",
+            "contentType": "content_type", "postingType": "posting_type", "isUrgent": "is_urgent",
         }
         for f in editable_fields:
             if f in data:
