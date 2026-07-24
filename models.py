@@ -101,6 +101,7 @@ class Task(db.Model):
     reference = db.Column(db.Text, default="")
     remark = db.Column(db.Text, default="")
     status = db.Column(db.String(20), default="Pending", nullable=False)  # Pending / Completed
+    is_urgent = db.Column(db.Boolean, default=False, nullable=False)
 
     created_at = db.Column(db.String(10), default=lambda: date.today().isoformat())
     completed_at = db.Column(db.String(10), nullable=True)
@@ -119,6 +120,7 @@ class Task(db.Model):
             "reference": self.reference,
             "remark": self.remark,
             "status": self.status,
+            "isUrgent": self.is_urgent,
             "createdAt": self.created_at,
             "completedAt": self.completed_at,
         }
