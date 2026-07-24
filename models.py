@@ -6,6 +6,7 @@ from extensions import db
 ROLES = ("admin", "manager", "designer")
 CONTENT_TYPES = ("Static", "Reel", "Carousel")
 POSTING_TYPES = ("Story", "Feed")
+PRIORITIES = ("High", "Medium", "Low")
 
 # Many-to-many: a client can have several managers and several designers.
 client_managers = db.Table(
@@ -120,4 +121,51 @@ class Task(db.Model):
             "status": self.status,
             "createdAt": self.created_at,
             "completedAt": self.completed_at,
+        }
+
+
+class OtherTask(db.Model):
+    """
+    A standalone, ad-hoc task not tied to any client's content calendar.
+    Admin can hand these to a Manager or a Designer; a Manager can hand
+    them to a Designer. The optional attachment is stored directly in the
+    database (not on disk) so it survives redeploys on hosts with an
+    ephemeral filesystem, e.g. Render's free tier.
+    """
+    __tablename__ = "other_tasks"
+
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text, default="")
+    priority = db.Column(db.String(10), default="Medium", nullable=False)  # High / Medium / Low
+    deadline = db.Column(db.String(10), nullable=False)  # ISO yyyy-mm-dd
+    status = db.Column(db.String(20), default="Pending", nullable=False)  # Pending / Completed
+
+    assigned_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    assigned_to_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+
+    created_at = db.Column(db.String(10), default=lambda: date.today().isoformat())
+    completed_at = db.Column(db.String(10), nullable=True)
+
+    attachment_name = db.Column(db.String(255), nullable=True)
+    attachment_mimetype = db.Column(db.String(120), nullable=True)
+    attachment_data = db.Column(db.LargeBinary, nullable=True)
+
+    assigned_by_user = db.relationship("User", foreign_keys=[assigned_by_id])
+    assigned_to_user = db.relationship("User", foreign_keys=[assigned_to_id])
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "title": self.title,
+            "description": self.description,
+            "priority": self.priority,
+            "deadline": self.deadline,
+            "status": self.status,
+            "assignedById": self.assigned_by_id,
+            "assignedToId": self.assigned_to_id,
+            "createdAt": self.created_at,
+            "completedAt": self.completed_at,
+            "hasAttachment": bool(self.attachment_data),
+            "attachmentName": self.attachment_name,
         }
