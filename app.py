@@ -1,3 +1,4 @@
+import io
 import os
 from datetime import date
 from functools import wraps
@@ -6,10 +7,14 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_login import (
     LoginManager, login_user, logout_user, login_required, current_user,
 )
+from sqlalchemy import or_
+from werkzeug.utils import secure_filename
 
 from extensions import db, login_manager
-from models import User, Client, Task
+from models import User, Client, Task, OtherTask, PRIORITIES
 from excel_utils import read_rows_from_upload, import_tasks, build_template_workbook
+
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024  # 5 MB
 
 
 def create_app():
@@ -139,6 +144,20 @@ def client_editable_by_current_user(client):
     return False
 
 
+def can_assign_other_task_to(assigner_role, target_role):
+    if assigner_role == "admin":
+        return target_role in ("manager", "designer")
+    if assigner_role == "manager":
+        return target_role == "designer"
+    return False
+
+
+def other_task_visible_to_current_user(ot):
+    if current_user.role == "admin":
+        return True
+    return current_user.id in (ot.assigned_by_id, ot.assigned_to_id)
+
+
 def register_routes(app):
 
     # ---------- Frontend ----------
@@ -208,7 +227,18 @@ def register_routes(app):
                 for t in Task.query.filter(Task.client_id.in_(client_ids)).all()
             ]
 
-        return jsonify({"me": current_user.to_dict(), "users": users, "clients": clients, "tasks": tasks})
+        if current_user.role == "admin":
+            other_tasks_q = OtherTask.query
+        else:
+            other_tasks_q = OtherTask.query.filter(
+                or_(OtherTask.assigned_by_id == current_user.id, OtherTask.assigned_to_id == current_user.id)
+            )
+        other_tasks = [ot.to_dict() for ot in other_tasks_q.order_by(OtherTask.created_at.desc()).all()]
+
+        return jsonify({
+            "me": current_user.to_dict(), "users": users, "clients": clients,
+            "tasks": tasks, "otherTasks": other_tasks,
+        })
 
     # ---------- User management (admin only) ----------
     @app.route("/api/users", methods=["POST"])
@@ -433,6 +463,119 @@ def register_routes(app):
         db.session.commit()
 
         return jsonify({"added": len(tasks_data), "skipped": skipped, "skippedRows": skipped_rows, "error": None})
+
+
+    # ---------- Other Tasks (ad-hoc, not tied to a client) ----------
+    @app.route("/api/other-tasks", methods=["POST"])
+    @roles_required("admin", "manager")
+    def create_other_task():
+        form = request.form
+        title = (form.get("title") or "").strip()
+        deadline = (form.get("deadline") or "").strip()
+        priority = form.get("priority") or "Medium"
+        assigned_to_id = to_int_or_none(form.get("assignedToId"))
+
+        if not title:
+            return jsonify({"error": "Title is required."}), 400
+        if not deadline:
+            return jsonify({"error": "Deadline is required."}), 400
+        if priority not in PRIORITIES:
+            priority = "Medium"
+
+        target = db.session.get(User, assigned_to_id) if assigned_to_id else None
+        if not target or not can_assign_other_task_to(current_user.role, target.role):
+            return jsonify({"error": "Choose a valid person to assign this to."}), 400
+
+        ot = OtherTask(
+            title=title,
+            description=(form.get("description") or "").strip(),
+            priority=priority,
+            deadline=deadline,
+            status="Pending",
+            assigned_by_id=current_user.id,
+            assigned_to_id=target.id,
+        )
+
+        file_storage = request.files.get("file")
+        if file_storage and file_storage.filename:
+            file_bytes = file_storage.read()
+            if len(file_bytes) > MAX_ATTACHMENT_BYTES:
+                return jsonify({"error": "Attachment is too large — the limit is 5 MB."}), 400
+            ot.attachment_name = secure_filename(file_storage.filename) or file_storage.filename
+            ot.attachment_mimetype = file_storage.mimetype
+            ot.attachment_data = file_bytes
+
+        db.session.add(ot)
+        db.session.commit()
+        return jsonify({"otherTask": ot.to_dict()}), 201
+
+    @app.route("/api/other-tasks/<int:ot_id>", methods=["PATCH"])
+    @login_required
+    def update_other_task(ot_id):
+        ot = db.session.get(OtherTask, ot_id)
+        if not ot:
+            return jsonify({"error": "Task not found."}), 404
+
+        is_owner = current_user.role == "admin" or current_user.id == ot.assigned_by_id
+        is_assignee = current_user.id == ot.assigned_to_id
+        data = request.get_json(silent=True) or {}
+
+        if is_owner:
+            if "title" in data and data["title"].strip():
+                ot.title = data["title"].strip()
+            if "description" in data:
+                ot.description = data["description"] or ""
+            if "priority" in data and data["priority"] in PRIORITIES:
+                ot.priority = data["priority"]
+            if "deadline" in data and data["deadline"]:
+                ot.deadline = data["deadline"]
+            if "assignedToId" in data:
+                new_target = db.session.get(User, to_int_or_none(data["assignedToId"]))
+                if not new_target or not can_assign_other_task_to(current_user.role, new_target.role):
+                    return jsonify({"error": "Choose a valid person to assign this to."}), 400
+                ot.assigned_to_id = new_target.id
+            if "status" in data and data["status"] in ("Pending", "Completed"):
+                ot.status = data["status"]
+                ot.completed_at = date.today().isoformat() if ot.status == "Completed" else None
+            db.session.commit()
+            return jsonify({"otherTask": ot.to_dict()})
+
+        if is_assignee:
+            if set(data.keys()) - {"status"} or data.get("status") != "Completed":
+                return jsonify({"error": "You can only mark this task as completed."}), 403
+            ot.status = "Completed"
+            ot.completed_at = date.today().isoformat()
+            db.session.commit()
+            return jsonify({"otherTask": ot.to_dict()})
+
+        return jsonify({"error": "You don't have access to this task."}), 403
+
+    @app.route("/api/other-tasks/<int:ot_id>", methods=["DELETE"])
+    @login_required
+    def delete_other_task(ot_id):
+        ot = db.session.get(OtherTask, ot_id)
+        if not ot:
+            return jsonify({"error": "Task not found."}), 404
+        if not (current_user.role == "admin" or current_user.id == ot.assigned_by_id):
+            return jsonify({"error": "Only the person who assigned this task can delete it."}), 403
+        db.session.delete(ot)
+        db.session.commit()
+        return jsonify({"ok": True})
+
+    @app.route("/api/other-tasks/<int:ot_id>/attachment")
+    @login_required
+    def download_other_task_attachment(ot_id):
+        ot = db.session.get(OtherTask, ot_id)
+        if not ot or not ot.attachment_data:
+            return jsonify({"error": "No attachment found."}), 404
+        if not other_task_visible_to_current_user(ot):
+            return jsonify({"error": "You don't have access to this file."}), 403
+        return send_file(
+            io.BytesIO(ot.attachment_data),
+            as_attachment=True,
+            download_name=ot.attachment_name or "attachment",
+            mimetype=ot.attachment_mimetype or "application/octet-stream",
+        )
 
 
 app = create_app()
