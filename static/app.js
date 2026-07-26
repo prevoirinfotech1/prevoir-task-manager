@@ -32,6 +32,20 @@ let toastMsg = null;
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 function fmtDate(d){ if(!d) return '—'; const dt=new Date(d+'T00:00:00'); if(isNaN(dt)) return d; return dt.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}); }
 function daysDiff(iso){ if(!iso) return NaN; const dt=new Date(iso+'T00:00:00'); const t=new Date(todayISO()+'T00:00:00'); return Math.round((dt-t)/86400000); }
+function fmtDateTime(iso){
+  if(!iso) return '—';
+  const dt = new Date(iso);
+  if(isNaN(dt)) return iso;
+  return dt.toLocaleString('en-GB', {day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit'});
+}
+// Converts a UTC timestamp into the browser's local calendar date (yyyy-mm-dd),
+// so "on time" is judged against the day it actually was for the person completing it.
+function localDateOnly(isoUtc){
+  if(!isoUtc) return null;
+  const d = new Date(isoUtc);
+  if(isNaN(d)) return null;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
 function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 function showToast(msg){ toastMsg = msg; render(); setTimeout(()=>{ toastMsg=null; render(); }, 2600); }
@@ -80,7 +94,7 @@ function designerPerformance(userId){
   const total = tasks.length;
   const completed = tasks.filter(t=>t.status==='Completed');
   const completedCount = completed.length;
-  const onTime = completed.filter(t=>t.completedAt && t.completedAt<=t.deadline).length;
+  const onTime = completed.filter(t=>t.completedAt && localDateOnly(t.completedAt)<=t.deadline).length;
   const late = completedCount - onTime;
   const pending = tasks.filter(t=>t.status!=='Completed').length;
   const overdue = tasks.filter(t=>t.status!=='Completed' && daysDiff(t.deadline)<0).length;
@@ -93,6 +107,23 @@ function scorePill(score){
   if(score===null) return '<span class="pill pill-neutral">—</span>';
   const cls = score>=80 ? 'pill-completed' : score>=50 ? 'pill-soon' : 'pill-overdue';
   return `<span class="pill ${cls}">${score}</span>`;
+}
+function scoreColor(score){
+  if(score===null) return 'var(--ink-faint)';
+  if(score>=80) return 'var(--success)';
+  if(score>=50) return '#9a6b12';
+  return 'var(--danger)';
+}
+function metricBar(label, value){
+  const v = Math.max(0, Math.min(100, value||0));
+  const color = v>=80 ? 'var(--success)' : v>=50 ? 'var(--accent)' : 'var(--danger)';
+  return `<div class="metric-bar">
+    <div class="metric-bar-label"><span>${escapeHtml(label)}</span><b>${v}%</b></div>
+    <div class="metric-bar-track"><div class="metric-bar-fill" style="width:${v}%; background:${color};"></div></div>
+  </div>`;
+}
+function completedAtLine(t){
+  return (t.status==='Completed' && t.completedAt) ? `<div class="muted" style="font-size:11px; margin-top:3px;">Completed ${fmtDateTime(t.completedAt)}</div>` : '';
 }
 
 function statusPill(task){
@@ -160,7 +191,8 @@ const ICONS = {
   logout:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
   clock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
   key:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="M11 12 20 3M20 3h-4M20 3v4"/></svg>',
-  flame:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2c1 3-3 4-3 8a3 3 0 0 0 6 0c0-1-1-2-1-3 2 1 3 3 3 6a5 5 0 0 1-10 0c0-5 3-6 5-11Z"/></svg>'
+  flame:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2c1 3-3 4-3 8a3 3 0 0 0 6 0c0-1-1-2-1-3 2 1 3 3 3 6a5 5 0 0 1-10 0c0-5 3-6 5-11Z"/></svg>',
+  chart:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V11"/><path d="M10 19V5"/><path d="M16 19v-7"/><path d="M3 19h18"/></svg>'
 };
 function navItemsFor(role){
   if(role==='admin') return [
@@ -171,6 +203,7 @@ function navItemsFor(role){
     ['alltasks','All Tasks','tasks'],
     ['urgenttasks','Urgent Tasks','flame'],
     ['othertasks','Other Tasks','clock'],
+    ['performance','Performance','chart'],
   ];
   if(role==='manager') return [
     ['dashboard','Dashboard','dashboard'],
@@ -181,6 +214,7 @@ function navItemsFor(role){
   ];
   return [
     ['dashboard','My Pending Tasks','clock'],
+    ['performance','Performance','chart'],
     ['myclients','My Clients','clients'],
     ['urgenttasks','Urgent Tasks','flame'],
     ['othertasks','Other Tasks','clock'],
@@ -211,6 +245,7 @@ function renderApp(){
     managers:'Managers', designers:'Designers', clients:'Clients',
     alltasks: 'All Tasks',
     urgenttasks:'Urgent Tasks',
+    performance:'Performance',
     myclients:'My Clients', othertasks:'Other Tasks'
   };
   return `
@@ -238,6 +273,7 @@ function renderTab(){
   if(ui.tab==='clients') return renderAdminClients();
   if(ui.tab==='alltasks') return renderAllTasks();
   if(ui.tab==='urgenttasks') return renderUrgentTasks();
+  if(ui.tab==='performance') return session.role==='admin' ? renderAdminPerformance() : renderDesignerPerformance();
   if(ui.tab==='myclients') return ui.clientId ? renderClientDetail(ui.clientId) : renderMyClients();
   if(ui.tab==='othertasks') return renderOtherTasks();
   return '';
@@ -400,7 +436,7 @@ function renderCombinedDueList(items){
         <td>${c?escapeHtml(c.name):'—'}</td>
         <td>${it.isUrgent?'<span class="pill pill-urgent">🔥 Urgent</span>':'<span class="muted">—</span>'}</td>
         <td>${deadlineTag(it)}${it._pinned?' <span class="muted" style="font-size:11px;">(outside range)</span>':''}</td>
-        <td>${statusPill(it)}</td>
+        <td>${statusPill(it)}${completedAtLine(it)}</td>
         <td><button class="btn btn-sm btn-accent" data-action="complete" data-id="${it.id}">Mark complete</button></td>
       </tr>`;
     }
@@ -411,7 +447,7 @@ function renderCombinedDueList(items){
       <td>${by?`From: ${escapeHtml(by.name)}`:'—'}${it.hasAttachment?` · <a href="/api/other-tasks/${it.id}/attachment">📎 ${escapeHtml(it.attachmentName||'File')}</a>`:''}</td>
       <td>${priorityPill(it.priority)}</td>
       <td>${deadlineTag(it)}</td>
-      <td>${statusPill(it)}</td>
+      <td>${statusPill(it)}${completedAtLine(it)}</td>
       <td><button class="btn btn-sm btn-accent" data-action="completeother" data-id="${it.id}">Mark complete</button></td>
     </tr>`;
   }).join('')}
@@ -438,7 +474,7 @@ function renderTaskTableRows(tasks, showComplete, allowEdit, showClient){
       <td class="cell-wrap">${t.reference?`<span class="muted">${escapeHtml(t.reference)}</span>`:'—'}</td>
       <td>${deadlineTag(t)}</td>
       <td class="cell-wrap">${escapeHtml(t.remark||'—')}</td>
-      <td>${statusPill(t)}${t.isUrgent?' <span class="pill pill-urgent">🔥 Urgent</span>':''}</td>
+      <td>${statusPill(t)}${t.isUrgent?' <span class="pill pill-urgent">🔥 Urgent</span>':''}${completedAtLine(t)}</td>
       ${showComplete||allowEdit ? `<td style="white-space:nowrap;">
         ${showComplete && t.status!=='Completed' ? `<button class="btn btn-sm btn-accent" data-action="complete" data-id="${t.id}">Mark complete</button>` : ''}
         ${allowEdit ? `<button class="btn btn-sm ${t.isUrgent?'btn-ghost':'btn-danger'}" data-action="toggleurgent" data-id="${t.id}">${t.isUrgent?'Unmark urgent':'Mark urgent'}</button> <button class="btn btn-sm btn-ghost" data-action="edittask" data-id="${t.id}">Edit</button> <button class="btn btn-sm btn-danger" data-action="deletetask" data-id="${t.id}">Delete</button>` : ''}
@@ -577,6 +613,95 @@ function renderUrgentTasks(){
   </div>`;
 }
 
+/* ============================= PERFORMANCE ============================= */
+function renderDesignerPerformance(){
+  const perf = designerPerformance(session.id);
+  const allTasks = tasksForAssignee(session.id, 'designer');
+  const completedTasks = allTasks.filter(t=>t.status==='Completed').sort((a,b)=>(b.completedAt||'').localeCompare(a.completedAt||''));
+
+  return `
+  <div class="panel">
+    <div class="panel-body" style="display:flex; gap:32px; flex-wrap:wrap; align-items:center;">
+      <div style="text-align:center; min-width:120px;">
+        <div class="score-hero" style="color:${scoreColor(perf.score)};">${perf.score===null?'—':perf.score}</div>
+        <div class="muted" style="font-size:12.5px; margin-top:4px;">Performance score</div>
+      </div>
+      <div style="flex:1; min-width:240px;">
+        ${metricBar('Completion rate', perf.total?perf.completionRate:0)}
+        ${metricBar('On-time rate', perf.completedCount?perf.onTimeRate:0)}
+      </div>
+    </div>
+  </div>
+  <div class="stat-grid">
+    <div class="stat-card"><div class="num">${perf.total}</div><div class="lbl">Total assigned</div></div>
+    <div class="stat-card success"><div class="num">${perf.completedCount}</div><div class="lbl">Completed</div></div>
+    <div class="stat-card primary"><div class="num">${perf.pending}</div><div class="lbl">Pending</div></div>
+    <div class="stat-card danger"><div class="num">${perf.overdue}</div><div class="lbl">Overdue</div></div>
+    <div class="stat-card success"><div class="num">${perf.onTime}</div><div class="lbl">Completed on time</div></div>
+    <div class="stat-card danger"><div class="num">${perf.late}</div><div class="lbl">Completed late</div></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h3>Completion history (${completedTasks.length})</h3></div>
+    <div class="panel-body pad0">
+      ${completedTasks.length ? `<table><thead><tr><th>Client</th><th>Task</th><th>Deadline</th><th>Completed at</th><th></th></tr></thead><tbody>
+        ${completedTasks.map(t=>{
+          const c = clientById(t.clientId);
+          const onTime = t.completedAt && localDateOnly(t.completedAt)<=t.deadline;
+          return `<tr class="row-hover">
+            <td><b>${c?escapeHtml(c.name):'—'}</b></td>
+            <td class="cell-wrap">${escapeHtml(t.objective||t.caption||'—')}</td>
+            <td>${fmtDate(t.deadline)}</td>
+            <td class="mono">${fmtDateTime(t.completedAt)}</td>
+            <td>${onTime?'<span class="pill pill-completed">On time</span>':'<span class="pill pill-overdue">Late</span>'}</td>
+          </tr>`;
+        }).join('')}
+      </tbody></table>` : `<div class="empty-state"><b>No completed tasks yet</b>Once you mark tasks complete, they'll show up here with the exact date and time.</div>`}
+    </div>
+    <div class="panel-body" style="border-top:1px solid var(--line);"><span class="disclose">Score = 50% completion rate (completed ÷ total assigned) + 50% on-time rate (of completed tasks, how many were done by their deadline).</span></div>
+  </div>`;
+}
+
+function renderAdminPerformance(){
+  const rows = designerList().map(d=>({user:d, perf: designerPerformance(d.id)})).sort((a,b)=>(b.perf.score===null?-1:b.perf.score) - (a.perf.score===null?-1:a.perf.score));
+
+  return `
+  <div class="panel">
+    <div class="panel-head"><h3>Designer comparison</h3></div>
+    <div class="panel-body pad0">
+      ${rows.length ? rows.map(r=>`
+        <div class="designer-compare-row">
+          <div class="designer-compare-head">
+            <b>${escapeHtml(r.user.name)}</b>
+            ${scorePill(r.perf.score)}
+          </div>
+          ${metricBar('Completion rate', r.perf.total?r.perf.completionRate:0)}
+          ${metricBar('On-time rate', r.perf.completedCount?r.perf.onTimeRate:0)}
+        </div>
+      `).join('') : `<div class="empty-state"><b>No designers yet</b>Add a designer to see performance comparisons here.</div>`}
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h3>Full breakdown</h3></div>
+    <div class="panel-body pad0">
+      ${rows.length ? `<table><thead><tr><th>Designer</th><th>Total</th><th>Completed</th><th>Pending</th><th>Overdue</th><th>On time</th><th>Late</th><th>Completion</th><th>On-time rate</th><th>Score</th></tr></thead><tbody>
+        ${rows.map(r=>`<tr class="row-hover">
+          <td><b>${escapeHtml(r.user.name)}</b></td>
+          <td>${r.perf.total}</td>
+          <td>${r.perf.completedCount}</td>
+          <td>${r.perf.pending}</td>
+          <td style="${r.perf.overdue?'color:var(--danger); font-weight:600;':''}">${r.perf.overdue}</td>
+          <td>${r.perf.onTime}</td>
+          <td>${r.perf.late}</td>
+          <td>${r.perf.total? r.perf.completionRate+'%' : '—'}</td>
+          <td>${r.perf.completedCount? r.perf.onTimeRate+'%' : '—'}</td>
+          <td>${scorePill(r.perf.score)}</td>
+        </tr>`).join('')}
+      </tbody></table>` : ''}
+    </div>
+    <div class="panel-body" style="border-top:1px solid var(--line);"><span class="disclose">Score = 50% completion rate (completed ÷ total assigned) + 50% on-time rate (of completed tasks, how many were done by their deadline). "—" means no tasks assigned yet.</span></div>
+  </div>`;
+}
+
 /* ============================= MANAGER / DESIGNER: MY CLIENTS ============================= */
 function renderMyClients(){
   const list = clientsForUser();
@@ -654,7 +779,7 @@ function renderOtherTasks(){
       <td>${deadlineTag(t)}</td>
       <td>${to?escapeHtml(to.name):'—'}</td>
       <td>${by?escapeHtml(by.name):'—'}</td>
-      <td>${statusPill(t)}</td>
+      <td>${statusPill(t)}${completedAtLine(t)}</td>
       <td>${t.hasAttachment? `<a class="btn btn-sm btn-ghost" href="/api/other-tasks/${t.id}/attachment">📎 ${escapeHtml(t.attachmentName||'File')}</a>` : '<span class="muted">—</span>'}</td>
       <td style="white-space:nowrap;">
         ${isAssignee && t.status!=='Completed' ? `<button class="btn btn-sm btn-accent" data-action="completeother" data-id="${t.id}">Mark complete</button>` : ''}
