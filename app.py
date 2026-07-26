@@ -1,6 +1,6 @@
 import io
 import os
-from datetime import date
+from datetime import date, datetime
 from functools import wraps
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
@@ -15,6 +15,12 @@ from models import User, Client, Task, OtherTask, PRIORITIES
 from excel_utils import read_rows_from_upload, import_tasks, build_template_workbook
 
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+def now_utc_iso():
+    """UTC timestamp marked with 'Z' so the browser converts it to each user's
+    own local time for display, regardless of what timezone the server runs in."""
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
 def create_app():
@@ -39,6 +45,7 @@ def create_app():
         seed_default_admin()
         migrate_legacy_single_assignments()
         migrate_add_is_urgent_column()
+        migrate_widen_completed_at_columns()
 
     register_routes(app)
     return app
@@ -102,6 +109,24 @@ def migrate_add_is_urgent_column():
         if "is_urgent" not in columns:
             db.session.execute(text("ALTER TABLE tasks ADD COLUMN is_urgent BOOLEAN DEFAULT FALSE NOT NULL"))
             db.session.commit()
+    except Exception:
+        db.session.rollback()
+
+
+def migrate_widen_completed_at_columns():
+    """
+    completed_at used to store just a date ('2026-07-24', 10 chars). It now
+    stores a full timestamp ('2026-07-24T09:05:00Z', ~20 chars). On Postgres
+    the column was created as VARCHAR(10), which would reject the longer
+    value — this widens it to unbounded TEXT. SQLite doesn't enforce column
+    length at all, so there's nothing to do there. Safe to run every startup.
+    """
+    try:
+        if db.engine.dialect.name != "postgresql":
+            return
+        db.session.execute(text("ALTER TABLE tasks ALTER COLUMN completed_at TYPE TEXT"))
+        db.session.execute(text("ALTER TABLE other_tasks ALTER COLUMN completed_at TYPE TEXT"))
+        db.session.commit()
     except Exception:
         db.session.rollback()
 
@@ -402,7 +427,7 @@ def register_routes(app):
             if data.get("status") != "Completed":
                 return jsonify({"error": "Invalid status update."}), 400
             task.status = "Completed"
-            task.completed_at = date.today().isoformat()
+            task.completed_at = now_utc_iso()
             db.session.commit()
             return jsonify({"task": task.to_dict()})
 
@@ -421,7 +446,7 @@ def register_routes(app):
                 attr = field_map.get(f, f)
                 setattr(task, attr, data[f])
         if data.get("status") == "Completed" and not task.completed_at:
-            task.completed_at = date.today().isoformat()
+            task.completed_at = now_utc_iso()
         elif data.get("status") == "Pending":
             task.completed_at = None
         db.session.commit()
@@ -557,7 +582,7 @@ def register_routes(app):
                 ot.assigned_to_id = new_target.id
             if "status" in data and data["status"] in ("Pending", "Completed"):
                 ot.status = data["status"]
-                ot.completed_at = date.today().isoformat() if ot.status == "Completed" else None
+                ot.completed_at = now_utc_iso() if ot.status == "Completed" else None
             db.session.commit()
             return jsonify({"otherTask": ot.to_dict()})
 
@@ -565,7 +590,7 @@ def register_routes(app):
             if set(data.keys()) - {"status"} or data.get("status") != "Completed":
                 return jsonify({"error": "You can only mark this task as completed."}), 403
             ot.status = "Completed"
-            ot.completed_at = date.today().isoformat()
+            ot.completed_at = now_utc_iso()
             db.session.commit()
             return jsonify({"otherTask": ot.to_dict()})
 
