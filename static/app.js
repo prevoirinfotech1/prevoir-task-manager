@@ -67,6 +67,34 @@ function tasksForAssignee(userId, role){
   return DB.tasks.filter(t=>clientIds.includes(t.clientId));
 }
 
+/*
+ * Designer performance score — out of 100, built from two simple, visible halves:
+ *   Completion rate  = (tasks completed) / (all tasks ever assigned)        — did they get through their workload?
+ *   On-time rate     = (completed on/before deadline) / (tasks completed)   — when they finish, is it on time?
+ *   Score            = 50% completion rate + 50% on-time rate
+ * A designer with nothing assigned yet has no score (shown as "—") rather than a
+ * misleading 0 or 100. "On time" means completedAt <= deadline (same-day counts as on time).
+ */
+function designerPerformance(userId){
+  const tasks = tasksForAssignee(userId, 'designer');
+  const total = tasks.length;
+  const completed = tasks.filter(t=>t.status==='Completed');
+  const completedCount = completed.length;
+  const onTime = completed.filter(t=>t.completedAt && t.completedAt<=t.deadline).length;
+  const late = completedCount - onTime;
+  const pending = tasks.filter(t=>t.status!=='Completed').length;
+  const overdue = tasks.filter(t=>t.status!=='Completed' && daysDiff(t.deadline)<0).length;
+  const completionRate = total ? Math.round((completedCount/total)*100) : 0;
+  const onTimeRate = completedCount ? Math.round((onTime/completedCount)*100) : 0;
+  const score = total ? Math.round(completionRate*0.5 + onTimeRate*0.5) : null;
+  return {total, completedCount, pending, overdue, onTime, late, completionRate, onTimeRate, score};
+}
+function scorePill(score){
+  if(score===null) return '<span class="pill pill-neutral">—</span>';
+  const cls = score>=80 ? 'pill-completed' : score>=50 ? 'pill-soon' : 'pill-overdue';
+  return `<span class="pill ${cls}">${score}</span>`;
+}
+
 function statusPill(task){
   if(task.status==='Completed') return '<span class="pill pill-completed">Completed</span>';
   const d = daysDiff(task.deadline);
@@ -147,7 +175,7 @@ function navItemsFor(role){
   if(role==='manager') return [
     ['dashboard','Dashboard','dashboard'],
     ['myclients','My Clients','clients'],
-    ['alltasks','Search Tasks','tasks'],
+    ['alltasks','All Tasks','tasks'],
     ['urgenttasks','Urgent Tasks','flame'],
     ['othertasks','Other Tasks','clock'],
   ];
@@ -181,7 +209,7 @@ function renderApp(){
   const titleMap = {
     dashboard: session.role==='designer' ? 'My Pending Tasks' : 'Dashboard',
     managers:'Managers', designers:'Designers', clients:'Clients',
-    alltasks: session.role==='admin' ? 'All Tasks' : 'Search Tasks',
+    alltasks: 'All Tasks',
     urgenttasks:'Urgent Tasks',
     myclients:'My Clients', othertasks:'Other Tasks'
   };
@@ -324,11 +352,16 @@ function renderDesignerPending(){
     : range.from===range.to ? `Deadline: ${fmtDate(range.from)}` : `Deadline: ${fmtDate(range.from)} – ${fmtDate(range.to)}`;
   const pinnedCount = pinnedUrgentTasks.length;
 
+  const myPerf = designerPerformance(session.id);
+
   return `
   <div class="stat-grid">
     <div class="stat-card"><div class="num">${clientsForUser().length}</div><div class="lbl">My clients</div></div>
     <div class="stat-card primary"><div class="num">${allMyTasks.length}</div><div class="lbl">Pending tasks</div></div>
     <div class="stat-card danger"><div class="num">${overdue}</div><div class="lbl">Overdue</div></div>
+    <div class="stat-card"><div class="num">${myPerf.total? myPerf.completionRate+'%' : '—'}</div><div class="lbl">Completion rate</div></div>
+    <div class="stat-card"><div class="num">${myPerf.completedCount? myPerf.onTimeRate+'%' : '—'}</div><div class="lbl">On-time rate</div></div>
+    <div class="stat-card"><div class="num">${myPerf.score===null?'—':myPerf.score}</div><div class="lbl">My performance score</div></div>
   </div>
   <div class="panel">
     <div class="panel-head" style="flex-wrap:wrap; gap:10px;">
@@ -389,13 +422,14 @@ function renderCombinedDueList(items){
 function renderTaskTableRows(tasks, showComplete, allowEdit, showClient){
   if(!tasks.length) return `<div class="empty-state"><b>Nothing here</b>Tasks will show up once they're added.</div>`;
   return `<table><thead><tr>
-    ${showClient?'<th>Client</th>':''}
+    ${showClient?'<th>Client</th><th>Designer</th>':''}
     <th>Date</th><th>Type</th><th>Posting</th><th>Objective</th><th>Caption</th><th>Reference</th><th>Deadline</th><th>Remark</th><th>Status</th>${(showComplete||allowEdit)?'<th></th>':''}
   </tr></thead><tbody>
   ${tasks.map(t=>{
     const c = clientById(t.clientId);
+    const desNames = c ? namesForIds(c.designerIds) : [];
     return `<tr class="row-hover ${t.isUrgent?'urgent-row':''}">
-      ${showClient?`<td><b>${c?escapeHtml(c.name):'—'}</b></td>`:''}
+      ${showClient?`<td><b>${c?escapeHtml(c.name):'—'}</b></td><td>${desNames.length?escapeHtml(desNames.join(', ')):'<span class="muted">Unassigned</span>'}</td>`:''}
       <td class="mono">${fmtDate(t.date)}</td>
       <td><span class="type-tag">${escapeHtml(t.contentType||'—')}</span></td>
       <td>${escapeHtml(t.postingType||'—')}</td>
@@ -418,23 +452,33 @@ function renderTaskTableRows(tasks, showComplete, allowEdit, showClient){
 function renderUserList(role){
   const list = DB.users.filter(u=>u.role===role);
   const label = role==='manager'?'Manager':'Designer';
+  const isDesigner = role==='designer';
+  const perfHeaders = isDesigner ? '<th>Completion</th><th>On-time</th><th>Score</th>' : '';
   return `
   <div class="panel">
     <div class="panel-head"><h3>${label}s (${list.length})</h3><button class="btn btn-primary btn-sm" data-action="newuser" data-role="${role}">+ Add ${label}</button></div>
     <div class="panel-body pad0">
-      ${list.length? `<table><thead><tr><th>Name</th><th>Username</th><th>Clients</th><th>Total tasks</th><th>Pending</th><th>Overdue</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.length? `<table><thead><tr><th>Name</th><th>Username</th><th>Clients</th><th>Total tasks</th><th>Pending</th><th>Overdue</th>${perfHeaders}<th>Status</th><th></th></tr></thead><tbody>
         ${list.map(u=>{
           const cnt = DB.clients.filter(c=> role==='manager' ? c.managerIds.includes(u.id) : c.designerIds.includes(u.id)).length;
-          const stats = tasksForAssignee(u.id, role);
-          const pending = stats.filter(t=>t.status!=='Completed').length;
-          const overdue = stats.filter(t=>t.status!=='Completed' && daysDiff(t.deadline)<0).length;
+          const perf = isDesigner ? designerPerformance(u.id) : null;
+          const tasks = tasksForAssignee(u.id, role);
+          const total = isDesigner ? perf.total : tasks.length;
+          const pending = isDesigner ? perf.pending : tasks.filter(t=>t.status!=='Completed').length;
+          const overdue = isDesigner ? perf.overdue : tasks.filter(t=>t.status!=='Completed' && daysDiff(t.deadline)<0).length;
+          const perfCells = isDesigner ? `
+            <td>${perf.total? perf.completionRate+'%' : '<span class="muted">—</span>'}</td>
+            <td>${perf.completedCount? perf.onTimeRate+'%' : '<span class="muted">—</span>'}</td>
+            <td>${scorePill(perf.score)}</td>
+          ` : '';
           return `<tr class="row-hover">
             <td><b>${escapeHtml(u.name)}</b></td>
             <td class="mono">${escapeHtml(u.username)}</td>
             <td>${cnt}</td>
-            <td>${stats.length}</td>
+            <td>${total}</td>
             <td>${pending}</td>
             <td style="${overdue?'color:var(--danger); font-weight:600;':''}">${overdue}</td>
+            ${perfCells}
             <td>${u.active===false? '<span class="pill pill-neutral">Inactive</span>' : '<span class="pill pill-completed">Active</span>'}</td>
             <td style="white-space:nowrap;">
               <button class="btn btn-sm btn-ghost" data-action="resetpw" data-id="${u.id}">Reset password</button>
@@ -444,6 +488,7 @@ function renderUserList(role){
         }).join('')}
       </tbody></table>` : `<div class="empty-state"><b>No ${label.toLowerCase()}s yet</b>Add one to start assigning clients.</div>`}
     </div>
+    ${isDesigner ? `<div class="panel-body" style="border-top:1px solid var(--line);"><span class="disclose">Score = 50% completion rate (tasks completed ÷ total assigned) + 50% on-time rate (of completed tasks, how many were done by their deadline). Shows "—" until a designer has at least one task.</span></div>` : ''}
   </div>`;
 }
 
@@ -502,7 +547,7 @@ function renderAllTasks(){
   return `
   <div class="panel">
     <div class="panel-head" style="flex-wrap:wrap; gap:10px;">
-      <h3>${DB.clients.length ? (session.role==='admin'?'All tasks':'Tasks across my clients') : 'Tasks'} (${list.length})</h3>
+      <h3>All tasks (${list.length})</h3>
       <div class="toolbar">
         <input type="text" id="taskSearchBox" placeholder="Search title, caption, objective…" value="${escapeHtml(ui.taskSearch||'')}" style="min-width:220px;" />
         <select id="filterClient"><option value="all">All clients</option>${clientOpts}</select>
