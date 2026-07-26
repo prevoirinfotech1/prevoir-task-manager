@@ -104,7 +104,7 @@ class Task(db.Model):
     is_urgent = db.Column(db.Boolean, default=False, nullable=False)
 
     created_at = db.Column(db.String(10), default=lambda: date.today().isoformat())
-    completed_at = db.Column(db.String(10), nullable=True)
+    completed_at = db.Column(db.Text, nullable=True)  # full ISO timestamp, UTC, e.g. 2026-07-24T09:05:00Z
 
     def to_dict(self):
         return {
@@ -147,7 +147,7 @@ class OtherTask(db.Model):
     assigned_to_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
 
     created_at = db.Column(db.String(10), default=lambda: date.today().isoformat())
-    completed_at = db.Column(db.String(10), nullable=True)
+    completed_at = db.Column(db.Text, nullable=True)  # full ISO timestamp, UTC, e.g. 2026-07-24T09:05:00Z
 
     attachment_name = db.Column(db.String(255), nullable=True)
     attachment_mimetype = db.Column(db.String(120), nullable=True)
