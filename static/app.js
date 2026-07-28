@@ -25,7 +25,7 @@ const PRIORITIES_JS = ['High','Medium','Low'];
 
 let DB = { users: [], clients: [], tasks: [], otherTasks: [] };
 let session = null;
-let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:'', loginErr:null, loginBusy:false };
+let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:'', clientMonth:'', clientSelectedDay:null, clientTableScope:'month', loginErr:null, loginBusy:false };
 let modal = null;
 let toastMsg = null;
 
@@ -726,12 +726,83 @@ function renderMyClients(){
   </div>`;
 }
 
+function pad2(n){ return String(n).padStart(2,'0'); }
+function shiftMonth(ym, delta){
+  let [y,m] = ym.split('-').map(Number);
+  m += delta;
+  while(m<1){ m+=12; y--; }
+  while(m>12){ m-=12; y++; }
+  return `${y}-${pad2(m)}`;
+}
+function monthLabel(ym){
+  const [y,m] = ym.split('-').map(Number);
+  return new Date(y, m-1, 1).toLocaleDateString('en-GB', {month:'long', year:'numeric'});
+}
+function daysInMonth(ym){
+  const [y,m] = ym.split('-').map(Number);
+  return new Date(y, m, 0).getDate();
+}
+function firstWeekdayMonFirst(ym){
+  const [y,m] = ym.split('-').map(Number);
+  const wd = new Date(y, m-1, 1).getDay(); // 0=Sun..6=Sat
+  return (wd+6)%7; // 0=Mon..6=Sun
+}
+function renderClientCalendar(clientId, ym){
+  const tasks = tasksForClient(clientId);
+  const [y,m] = ym.split('-').map(Number);
+  const total = daysInMonth(ym);
+  const leading = firstWeekdayMonFirst(ym);
+  const weekdayHeaders = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=>`<div class="cal-weekday">${d}</div>`).join('');
+  let cells = '';
+  for(let i=0;i<leading;i++) cells += '<div class="cal-cell cal-blank"></div>';
+  for(let day=1; day<=total; day++){
+    const iso = `${y}-${pad2(m)}-${pad2(day)}`;
+    const dayTasks = tasks.filter(t=>t.date===iso);
+    let cls = 'cal-empty';
+    if(dayTasks.length) cls = dayTasks.every(t=>t.status==='Completed') ? 'cal-completed' : 'cal-pending';
+    const extra = [iso===todayISO()?'cal-today':'', ui.clientSelectedDay===iso?'cal-selected':''].join(' ');
+    cells += `<div class="cal-cell ${cls} ${extra}" data-action="calday" data-date="${iso}">
+      <div class="cal-daynum">${day}</div>
+      ${dayTasks.length?`<div class="cal-count">${dayTasks.length}</div>`:''}
+    </div>`;
+  }
+  return `
+  <div class="cal-toolbar">
+    <button class="btn btn-sm btn-ghost" data-action="calmonth" data-delta="-1">‹ Prev</button>
+    <div class="cal-month-label">${monthLabel(ym)}</div>
+    <button class="btn btn-sm btn-ghost" data-action="calmonth" data-delta="1">Next ›</button>
+    ${ui.clientSelectedDay ? `<button class="btn btn-sm btn-ghost" data-action="calcleardays">✕ ${fmtDate(ui.clientSelectedDay)}</button>` : ''}
+  </div>
+  <div class="cal-grid">${weekdayHeaders}${cells}</div>
+  <div class="cal-legend">
+    <span class="cal-legend-item"><span class="cal-swatch cal-empty"></span>No task</span>
+    <span class="cal-legend-item"><span class="cal-swatch cal-pending"></span>Assigned, incomplete</span>
+    <span class="cal-legend-item"><span class="cal-swatch cal-completed"></span>Completed</span>
+  </div>`;
+}
+
 function renderClientDetail(clientId){
   const c = clientById(clientId);
   if(!c) return `<div class="empty-state"><b>Client not found</b></div>`;
-  const tasks = [...tasksForClient(clientId)].sort((a,b)=>(a.deadline||'').localeCompare(b.deadline||''));
   const isManager = session.role==='manager' || session.role==='admin';
   const mgrNames = namesForIds(c.managerIds); const desNames = namesForIds(c.designerIds);
+
+  if(!ui.clientMonth) ui.clientMonth = todayISO().slice(0,7);
+  const allTasks = tasksForClient(clientId);
+  let visibleTasks;
+  if(ui.clientTableScope==='all'){
+    visibleTasks = allTasks;
+  } else if(ui.clientSelectedDay){
+    visibleTasks = allTasks.filter(t=>t.date===ui.clientSelectedDay);
+  } else {
+    visibleTasks = allTasks.filter(t=>t.date && t.date.slice(0,7)===ui.clientMonth);
+  }
+  visibleTasks = [...visibleTasks].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+
+  const scopeLabel = ui.clientTableScope==='all' ? `All tasks (${visibleTasks.length})`
+    : ui.clientSelectedDay ? `Tasks on ${fmtDate(ui.clientSelectedDay)} (${visibleTasks.length})`
+    : `Tasks in ${monthLabel(ui.clientMonth)} (${visibleTasks.length})`;
+
   return `
   <div style="margin-bottom:14px;"><span class="breadcrumb-link" data-nav="myclients">← All clients</span></div>
   <div class="panel">
@@ -746,7 +817,14 @@ function renderClientDetail(clientId){
         <button class="btn btn-primary btn-sm" data-action="newtask" data-id="${c.id}">+ Add task</button>
       </div>` : ''}
     </div>
-    <div class="panel-body pad0">${renderTaskTableRows(tasks, session.role==='designer', isManager, false)}</div>
+    <div class="panel-body">${renderClientCalendar(clientId, ui.clientMonth)}</div>
+  </div>
+  <div class="panel">
+    <div class="panel-head" style="flex-wrap:wrap; gap:10px;">
+      <h3>${scopeLabel}</h3>
+      ${ui.clientTableScope==='all' ? `<span class="breadcrumb-link" data-action="clientscopemonth">Show ${monthLabel(ui.clientMonth)} only →</span>` : `<span class="breadcrumb-link" data-action="clientscopeall">Show all tasks →</span>`}
+    </div>
+    <div class="panel-body pad0">${renderTaskTableRows(visibleTasks, session.role==='designer', isManager, false)}</div>
   </div>
   <input type="file" id="excelInput" accept=".xlsx,.xls,.csv" style="display:none" data-client="${c.id}" />
   `;
@@ -901,7 +979,7 @@ function modalTaskForm(isEdit){
       <form id="taskForm">
       <div class="modal-body">
         <div class="grid-2">
-          <div class="field"><label>Date</label><input type="date" name="date" value="${v('date', todayISO())}" required /></div>
+          <div class="field"><label>Date</label><input type="date" name="date" value="${v('date', modal.payload.defaultDate || todayISO())}" required /></div>
           <div class="field"><label>Deadline</label><input type="date" name="deadline" value="${v('deadline')}" required /></div>
           <div class="field"><label>Type</label><select name="contentType">${CONTENT_TYPES.map(ct=>`<option ${v('contentType')===ct?'selected':''}>${ct}</option>`).join('')}</select></div>
           <div class="field"><label>Posting type</label><select name="postingType">${POSTING_TYPES.map(pt=>`<option ${v('postingType')===pt?'selected':''}>${pt}</option>`).join('')}</select></div>
@@ -994,7 +1072,7 @@ function bindEvents(){
       try{
         await apiPost('/api/login', {username: fd.get('username').trim(), password: fd.get('password')});
         await refreshState();
-        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:''};
+        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:'', clientMonth:'', clientSelectedDay:null, clientTableScope:'month'};
         render();
       }catch(err){
         ui.loginErr = err.message; ui.loginBusy = false; render();
@@ -1017,7 +1095,10 @@ function bindEvents(){
   root.querySelectorAll('[data-action="newclient"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newclient', payload:{}}; render(); }));
   root.querySelectorAll('[data-action="resetpw"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'resetpw', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
   root.querySelectorAll('[data-action="changepw"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'changepw', payload:{}}; render(); }));
-  root.querySelectorAll('[data-action="newtask"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newtask', payload:{clientId:Number(el.getAttribute('data-id'))}}; render(); }));
+  root.querySelectorAll('[data-action="newtask"]').forEach(el=> el.addEventListener('click', ()=>{
+    const defaultDate = ui.clientSelectedDay || (ui.clientMonth ? `${ui.clientMonth}-01` : todayISO());
+    modal={type:'newtask', payload:{clientId:Number(el.getAttribute('data-id')), defaultDate}}; render();
+  }));
   root.querySelectorAll('[data-action="edittask"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'edittask', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
 
   root.querySelectorAll('[data-action="newother"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newother', payload:{}}; render(); }));
@@ -1034,8 +1115,21 @@ function bindEvents(){
   const otherTaskFilter = document.getElementById('otherTaskFilter');
   if(otherTaskFilter) otherTaskFilter.addEventListener('change', ()=>{ ui.otherTaskFilter = otherTaskFilter.value; render(); });
 
-  root.querySelectorAll('[data-action="openclient"]').forEach(el=> el.addEventListener('click', ()=>{ ui.clientId = Number(el.getAttribute('data-id')); render(); }));
-  root.querySelectorAll('[data-action="viewclient"]').forEach(el=> el.addEventListener('click', ()=>{ ui.tab='myclients'; ui.clientId = Number(el.getAttribute('data-id')); render(); }));
+  root.querySelectorAll('[data-action="openclient"]').forEach(el=> el.addEventListener('click', ()=>{ ui.clientId = Number(el.getAttribute('data-id')); ui.clientMonth = todayISO().slice(0,7); ui.clientSelectedDay=null; ui.clientTableScope='month'; render(); }));
+  root.querySelectorAll('[data-action="viewclient"]').forEach(el=> el.addEventListener('click', ()=>{ ui.tab='myclients'; ui.clientId = Number(el.getAttribute('data-id')); ui.clientMonth = todayISO().slice(0,7); ui.clientSelectedDay=null; ui.clientTableScope='month'; render(); }));
+
+  root.querySelectorAll('[data-action="calmonth"]').forEach(el=> el.addEventListener('click', ()=>{
+    ui.clientMonth = shiftMonth(ui.clientMonth, Number(el.getAttribute('data-delta')));
+    ui.clientSelectedDay = null; ui.clientTableScope='month'; render();
+  }));
+  root.querySelectorAll('[data-action="calday"]').forEach(el=> el.addEventListener('click', ()=>{
+    const d = el.getAttribute('data-date');
+    ui.clientSelectedDay = ui.clientSelectedDay===d ? null : d;
+    ui.clientTableScope='month'; render();
+  }));
+  root.querySelectorAll('[data-action="calcleardays"]').forEach(el=> el.addEventListener('click', ()=>{ ui.clientSelectedDay=null; render(); }));
+  root.querySelectorAll('[data-action="clientscopeall"]').forEach(el=> el.addEventListener('click', ()=>{ ui.clientTableScope='all'; ui.clientSelectedDay=null; render(); }));
+  root.querySelectorAll('[data-action="clientscopemonth"]').forEach(el=> el.addEventListener('click', ()=>{ ui.clientTableScope='month'; render(); }));
 
   root.querySelectorAll('[data-action="dashfilter"]').forEach(el=> el.addEventListener('click', ()=>{
     const f = el.getAttribute('data-filter');
