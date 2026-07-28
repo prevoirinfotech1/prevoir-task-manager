@@ -25,7 +25,7 @@ const PRIORITIES_JS = ['High','Medium','Low'];
 
 let DB = { users: [], clients: [], tasks: [], otherTasks: [] };
 let session = null;
-let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:'', clientMonth:'', clientSelectedDay:null, clientTableScope:'month', loginErr:null, loginBusy:false };
+let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', taskMonthFilter:'all', urgentMonthFilter:'all', otherTaskMonthFilter:'all', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:'', clientMonth:'', clientSelectedDay:null, clientTableScope:'month', loginErr:null, loginBusy:false };
 let modal = null;
 let toastMsg = null;
 
@@ -571,6 +571,7 @@ function renderAllTasks(){
   if(ui.taskFilter==='completed') list = list.filter(t=>t.status==='Completed');
   if(ui.taskFilter==='overdue') list = list.filter(t=>t.status!=='Completed' && daysDiff(t.deadline)<0);
   if(ui.taskFilter==='urgent') list = list.filter(t=>t.isUrgent);
+  if(ui.taskMonthFilter && ui.taskMonthFilter!=='all') list = list.filter(t=>t.date && t.date.slice(0,7)===ui.taskMonthFilter);
   const q = (ui.taskSearch||'').trim().toLowerCase();
   if(q){
     list = list.filter(t=>{
@@ -594,6 +595,8 @@ function renderAllTasks(){
           <option value="overdue" ${ui.taskFilter==='overdue'?'selected':''}>Overdue</option>
           <option value="urgent" ${ui.taskFilter==='urgent'?'selected':''}>Urgent</option>
         </select>
+        <input type="month" id="taskMonthFilterInput" value="${ui.taskMonthFilter==='all'?'':ui.taskMonthFilter}" title="Filter by scheduled month" />
+        ${ui.taskMonthFilter!=='all' ? `<button class="btn btn-sm btn-ghost" data-action="clearmonthfilter" data-target="taskMonthFilter">✕ Month</button>` : ''}
       </div>
     </div>
     <div class="panel-body pad0">${renderTaskTableRows(list, false, true, true)}</div>
@@ -601,12 +604,20 @@ function renderAllTasks(){
 }
 
 function renderUrgentTasks(){
-  const list = [...tasksForUser()].filter(t=>t.isUrgent).sort((a,b)=> (a.status==='Completed')-(b.status==='Completed') || (a.deadline||'').localeCompare(b.deadline||''));
+  let list = [...tasksForUser()].filter(t=>t.isUrgent);
+  if(ui.urgentMonthFilter && ui.urgentMonthFilter!=='all') list = list.filter(t=>t.date && t.date.slice(0,7)===ui.urgentMonthFilter);
+  list.sort((a,b)=> (a.status==='Completed')-(b.status==='Completed') || (a.deadline||'').localeCompare(b.deadline||''));
   const allowEdit = session.role==='admin' || session.role==='manager';
   const showComplete = session.role==='designer';
   return `
   <div class="panel">
-    <div class="panel-head"><h3>Urgent tasks (${list.length})</h3></div>
+    <div class="panel-head" style="flex-wrap:wrap; gap:10px;">
+      <h3>Urgent tasks (${list.length})</h3>
+      <div class="toolbar">
+        <input type="month" id="urgentMonthFilterInput" value="${ui.urgentMonthFilter==='all'?'':ui.urgentMonthFilter}" title="Filter by scheduled month" />
+        ${ui.urgentMonthFilter!=='all' ? `<button class="btn btn-sm btn-ghost" data-action="clearmonthfilter" data-target="urgentMonthFilter">✕ Month</button>` : ''}
+      </div>
+    </div>
     <div class="panel-body pad0">
       ${list.length ? renderTaskTableRows(list, showComplete, allowEdit, true) : `<div class="empty-state"><b>Nothing urgent right now</b>Tasks marked urgent by a manager or admin will show up here.</div>`}
     </div>
@@ -761,9 +772,16 @@ function renderClientCalendar(clientId, ym){
     let cls = 'cal-empty';
     if(dayTasks.length) cls = dayTasks.every(t=>t.status==='Completed') ? 'cal-completed' : 'cal-pending';
     const extra = [iso===todayISO()?'cal-today':'', ui.clientSelectedDay===iso?'cal-selected':''].join(' ');
-    cells += `<div class="cal-cell ${cls} ${extra}" data-action="calday" data-date="${iso}">
+    const tooltip = dayTasks.map(t=>`${t.objective||t.caption||t.contentType||'Task'} (${t.status})`).join(' | ').replace(/"/g,'&quot;');
+    const shown = dayTasks.slice(0,2);
+    const chips = shown.map(t=>{
+      const label = (t.objective||t.caption||t.contentType||'Task');
+      return `<div class="cal-task-chip ${t.status==='Completed'?'done':''}">${escapeHtml(label.length>22?label.slice(0,20)+'…':label)}</div>`;
+    }).join('');
+    const more = dayTasks.length>2 ? `<div class="cal-more">+${dayTasks.length-2} more</div>` : '';
+    cells += `<div class="cal-cell ${cls} ${extra}" data-action="calday" data-date="${iso}" title="${tooltip}">
       <div class="cal-daynum">${day}</div>
-      ${dayTasks.length?`<div class="cal-count">${dayTasks.length}</div>`:''}
+      <div class="cal-tasks">${chips}${more}</div>
     </div>`;
   }
   return `
@@ -845,6 +863,7 @@ function renderOtherTasks(){
   if(ui.otherTaskFilter==='pending') list = list.filter(t=>t.status!=='Completed');
   if(ui.otherTaskFilter==='completed') list = list.filter(t=>t.status==='Completed');
   if(ui.otherTaskFilter==='overdue') list = list.filter(t=>t.status!=='Completed' && daysDiff(t.deadline)<0);
+  if(ui.otherTaskMonthFilter && ui.otherTaskMonthFilter!=='all') list = list.filter(t=>t.deadline && t.deadline.slice(0,7)===ui.otherTaskMonthFilter);
   list.sort((a,b)=> (a.status==='Completed')-(b.status==='Completed') || (a.deadline||'').localeCompare(b.deadline||''));
 
   const rows = list.map(t=>{
@@ -877,6 +896,8 @@ function renderOtherTasks(){
           <option value="overdue" ${ui.otherTaskFilter==='overdue'?'selected':''}>Overdue</option>
           <option value="completed" ${ui.otherTaskFilter==='completed'?'selected':''}>Completed</option>
         </select>
+        <input type="month" id="otherTaskMonthFilterInput" value="${ui.otherTaskMonthFilter==='all'?'':ui.otherTaskMonthFilter}" title="Filter by deadline month" />
+        ${ui.otherTaskMonthFilter!=='all' ? `<button class="btn btn-sm btn-ghost" data-action="clearmonthfilter" data-target="otherTaskMonthFilter">✕ Month</button>` : ''}
         ${canCreate ? `<button class="btn btn-primary btn-sm" data-action="newother">+ Assign task</button>` : ''}
       </div>
     </div>
@@ -1072,7 +1093,7 @@ function bindEvents(){
       try{
         await apiPost('/api/login', {username: fd.get('username').trim(), password: fd.get('password')});
         await refreshState();
-        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:'', clientMonth:'', clientSelectedDay:null, clientTableScope:'month'};
+        ui = {tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', taskMonthFilter:'all', urgentMonthFilter:'all', otherTaskMonthFilter:'all', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:'', clientMonth:'', clientSelectedDay:null, clientTableScope:'month'};
         render();
       }catch(err){
         ui.loginErr = err.message; ui.loginBusy = false; render();
@@ -1175,6 +1196,14 @@ function bindEvents(){
   if(filterClient) filterClient.addEventListener('change', ()=>{ ui.taskClientFilter = filterClient.value; render(); });
   const filterStatus = document.getElementById('filterStatus');
   if(filterStatus) filterStatus.addEventListener('change', ()=>{ ui.taskFilter = filterStatus.value; render(); });
+
+  const taskMonthFilterInput = document.getElementById('taskMonthFilterInput');
+  if(taskMonthFilterInput) taskMonthFilterInput.addEventListener('change', ()=>{ ui.taskMonthFilter = taskMonthFilterInput.value || 'all'; render(); });
+  const urgentMonthFilterInput = document.getElementById('urgentMonthFilterInput');
+  if(urgentMonthFilterInput) urgentMonthFilterInput.addEventListener('change', ()=>{ ui.urgentMonthFilter = urgentMonthFilterInput.value || 'all'; render(); });
+  const otherTaskMonthFilterInput = document.getElementById('otherTaskMonthFilterInput');
+  if(otherTaskMonthFilterInput) otherTaskMonthFilterInput.addEventListener('change', ()=>{ ui.otherTaskMonthFilter = otherTaskMonthFilterInput.value || 'all'; render(); });
+  root.querySelectorAll('[data-action="clearmonthfilter"]').forEach(el=> el.addEventListener('click', ()=>{ ui[el.getAttribute('data-target')] = 'all'; render(); }));
   const taskSearchBox = document.getElementById('taskSearchBox');
   if(taskSearchBox){
     taskSearchBox.addEventListener('input', ()=>{
