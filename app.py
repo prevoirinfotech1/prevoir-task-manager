@@ -11,7 +11,7 @@ from sqlalchemy import or_, inspect, text
 from werkzeug.utils import secure_filename
 
 from extensions import db, login_manager
-from models import User, Client, Task, OtherTask, PRIORITIES
+from models import User, Client, Task, OtherTask, PRIORITIES, client_managers, client_designers
 from excel_utils import read_rows_from_upload, import_tasks, build_template_workbook
 
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -334,6 +334,24 @@ def register_routes(app):
         user.active = not user.active
         db.session.commit()
         return jsonify({"user": user.to_dict()})
+
+    @app.route("/api/admin/reset-all-data", methods=["POST"])
+    @roles_required("admin")
+    def reset_all_data():
+        data = request.get_json(silent=True) or {}
+        if (data.get("confirm") or "").strip() != "RESET":
+            return jsonify({"error": 'Type RESET exactly to confirm.'}), 400
+
+        # Bulk .delete() bypasses ORM-level cascade for many-to-many secondary
+        # tables, so the association rows are cleared explicitly first.
+        db.session.execute(client_managers.delete())
+        db.session.execute(client_designers.delete())
+        Task.query.delete()
+        OtherTask.query.delete()
+        Client.query.delete()
+        User.query.filter(User.role != "admin").delete()
+        db.session.commit()
+        return jsonify({"ok": True})
 
     # ---------- Clients ----------
     @app.route("/api/clients", methods=["POST"])
