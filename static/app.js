@@ -306,6 +306,13 @@ function renderDashboard(){
           }).join('')}
         </tbody></table>` : `<div class="empty-state"><b>No clients yet</b>Create your first client from the Clients tab.</div>`}
       </div>
+    </div>
+    <div class="panel" style="border-color:var(--danger-tint);">
+      <div class="panel-head"><h3 style="color:var(--danger);">Danger zone</h3></div>
+      <div class="panel-body">
+        <p style="font-size:13.5px; color:var(--ink-soft); margin:0 0 12px;">Permanently delete every client, task, and Other Task, plus every Manager and Designer login. Your own Admin login is kept so you're never locked out. This cannot be undone.</p>
+        <button class="btn btn-danger btn-sm" data-action="resetalldata">Reset all data…</button>
+      </div>
     </div>`;
   }
   if(session.role==='manager'){
@@ -919,6 +926,7 @@ function renderModal(){
   if(modal.type==='newother') return modalOtherTaskForm();
   if(modal.type==='editother') return modalOtherTaskForm(true);
   if(modal.type==='importresult') return modalImportResult();
+  if(modal.type==='resetall') return modalResetAll();
   return '';
 }
 function modalNewUser(){
@@ -1045,6 +1053,27 @@ function modalOtherTaskForm(isEdit){
     </div>
   </div>`;
 }
+function modalResetAll(){
+  return `<div class="modal-overlay" data-action="closemodal">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head"><h3 style="color:var(--danger);">Reset all data</h3><button class="modal-close" data-action="closemodal">&times;</button></div>
+      <form id="resetAllForm">
+      <div class="modal-body">
+        ${modal.payload.err?`<div class="error-msg">${escapeHtml(modal.payload.err)}</div>`:''}
+        <p style="font-size:13.5px; line-height:1.6;">This will permanently delete:</p>
+        <ul style="font-size:13.5px; line-height:1.8; margin:0 0 14px;">
+          <li>Every client and its calendar of tasks</li>
+          <li>Every Other Task</li>
+          <li>Every Manager and Designer login</li>
+        </ul>
+        <p style="font-size:13.5px; line-height:1.6;">Your own Admin login stays as-is. <b>This cannot be undone.</b></p>
+        <div class="field"><label>Type RESET to confirm</label><input type="text" name="confirm" autocomplete="off" required /></div>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn btn-ghost" data-action="closemodal">Cancel</button><button type="submit" class="btn btn-danger">Delete everything</button></div>
+      </form>
+    </div>
+  </div>`;
+}
 function modalImportResult(){
   const {added, skipped, error, skippedRows, detectedHeaders} = modal.payload;
   if(error){
@@ -1113,6 +1142,7 @@ function bindEvents(){
   root.querySelectorAll('[data-action="closemodal"]').forEach(el=> el.addEventListener('click', ()=>{ modal=null; render(); }));
 
   root.querySelectorAll('[data-action="newuser"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newuser', payload:{role:el.getAttribute('data-role')}}; render(); }));
+  root.querySelectorAll('[data-action="resetalldata"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'resetall', payload:{}}; render(); }));
   root.querySelectorAll('[data-action="newclient"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newclient', payload:{}}; render(); }));
   root.querySelectorAll('[data-action="resetpw"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'resetpw', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
   root.querySelectorAll('[data-action="changepw"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'changepw', payload:{}}; render(); }));
@@ -1241,6 +1271,18 @@ function bindEvents(){
     try{
       await apiPost('/api/users', {name: fd.get('name').trim(), username: fd.get('username').trim(), password: fd.get('password'), role: modal.payload.role});
       await refreshState(); modal=null; showToast('Login created'); render();
+    }catch(err){ modal.payload.err = err.message; render(); }
+  });
+
+  const resetAllForm = document.getElementById('resetAllForm');
+  if(resetAllForm) resetAllForm.addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(resetAllForm);
+    if(fd.get('confirm') !== 'RESET'){ modal.payload.err = 'Type RESET exactly (all capitals) to confirm.'; render(); return; }
+    if(!confirm('Really delete every client, task, and non-admin login? This cannot be undone.')) return;
+    try{
+      await apiPost('/api/admin/reset-all-data', {confirm: 'RESET'});
+      await refreshState(); modal=null; ui.tab='dashboard'; ui.clientId=null; showToast('All data has been reset'); render();
     }catch(err){ modal.payload.err = err.message; render(); }
   });
 
