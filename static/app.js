@@ -22,7 +22,6 @@ const apiDelete = (path)=> api(path, {method:'DELETE'});
 const CONTENT_TYPES = ['Static','Reel','Carousel'];
 const POSTING_TYPES = ['Story','Feed'];
 const PRIORITIES_JS = ['High','Medium','Low'];
-const TODO_STATUSES_JS = ['Pending','Complete','Cancelled'];
 
 let DB = { users: [], clients: [], tasks: [], otherTasks: [], todos: [] };
 let session = null;
@@ -745,18 +744,21 @@ function todoDeadlineTag(t){
 function renderTodoRows(list){
   if(!list.length) return `<div class="empty-state"><b>Nothing here</b>Add a to-do to get started.</div>`;
   return `<table><thead><tr><th>Task</th><th>Deadline</th><th>Status</th><th>Remark</th><th></th></tr></thead><tbody>
-  ${list.map(t=>`<tr class="row-hover">
+  ${list.map(t=>{
+    const followups = t.followups||[];
+    const latestRemark = followups.length ? followups[0].remark : t.remark;
+    return `<tr class="row-hover">
     <td><b>${escapeHtml(t.taskName)}</b></td>
     <td>${todoDeadlineTag(t)}</td>
     <td>${todoStatusPill(t.status)}${t.status==='Complete' && t.completedAt?`<div class="muted" style="font-size:11px; margin-top:3px;">Completed ${fmtDateTime(t.completedAt)}</div>`:''}</td>
-    <td class="cell-wrap">${escapeHtml(t.remark||'—')}</td>
+    <td class="cell-wrap">${escapeHtml(latestRemark||'—')}${followups.length?`<div style="margin-top:3px;"><span class="breadcrumb-link" data-action="viewfollowups" data-id="${t.id}" style="font-size:11.5px;">History (${followups.length})</span></div>`:''}</td>
     <td style="white-space:nowrap;">
-      ${t.status==='Pending'?`<button class="btn btn-sm btn-accent" data-action="todocomplete" data-id="${t.id}">Mark complete</button> <button class="btn btn-sm btn-ghost" data-action="todocancel" data-id="${t.id}">Cancel</button>`:''}
+      ${t.status==='Pending'?`<button class="btn btn-sm btn-primary" data-action="addfollowup" data-id="${t.id}">+ Follow-up</button> <button class="btn btn-sm btn-accent" data-action="todocomplete" data-id="${t.id}">Mark complete</button> <button class="btn btn-sm btn-ghost" data-action="todocancel" data-id="${t.id}">Cancel</button>`:''}
       ${t.status!=='Pending'?`<button class="btn btn-sm btn-ghost" data-action="todoreopen" data-id="${t.id}">Reopen</button>`:''}
-      <button class="btn btn-sm btn-ghost" data-action="edittodo" data-id="${t.id}">Edit</button>
       <button class="btn btn-sm btn-danger" data-action="deletetodo" data-id="${t.id}">Delete</button>
     </td>
-  </tr>`).join('')}
+  </tr>`;
+  }).join('')}
   </tbody></table>`;
 }
 function renderTodos(){
@@ -982,7 +984,8 @@ function renderModal(){
   if(modal.type==='importresult') return modalImportResult();
   if(modal.type==='resetall') return modalResetAll();
   if(modal.type==='newtodo') return modalTodoForm();
-  if(modal.type==='edittodo') return modalTodoForm(true);
+  if(modal.type==='addfollowup') return modalFollowupForm();
+  if(modal.type==='viewfollowups') return modalFollowupHistory();
   return '';
 }
 function modalNewUser(){
@@ -1130,25 +1133,61 @@ function modalResetAll(){
     </div>
   </div>`;
 }
-function modalTodoForm(isEdit){
-  const t = isEdit ? DB.todos.find(x=>x.id===modal.payload.id) : null;
-  const v = (f,d)=> t ? (t[f]!=null?t[f]:'') : (d||'');
+function modalTodoForm(){
   return `<div class="modal-overlay" data-action="closemodal">
     <div class="modal" onclick="event.stopPropagation()">
-      <div class="modal-head"><h3>${isEdit?'Edit to-do':'Add to-do'}</h3><button class="modal-close" data-action="closemodal">&times;</button></div>
+      <div class="modal-head"><h3>Add to-do</h3><button class="modal-close" data-action="closemodal">&times;</button></div>
       <form id="todoForm">
       <div class="modal-body">
         ${modal.payload.err?`<div class="error-msg">${escapeHtml(modal.payload.err)}</div>`:''}
-        <div class="field"><label>Task name</label><input name="taskName" value="${escapeHtml(v('taskName'))}" required /></div>
-        <div class="grid-2">
-          <div class="field"><label>Deadline (date)</label><input type="date" name="deadline" value="${v('deadline', todayISO())}" required /></div>
-          <div class="field"><label>Status</label><select name="status">${TODO_STATUSES_JS.map(s=>`<option ${v('status','Pending')===s?'selected':''}>${s}</option>`).join('')}</select></div>
-        </div>
-        <div class="field"><label>Remark</label><textarea name="remark" rows="3">${escapeHtml(v('remark'))}</textarea></div>
-        <div class="disclose">Set the deadline to any future date to schedule it — it'll show up in Today's To-Do once that date arrives.</div>
+        <div class="field"><label>Task name</label><input name="taskName" required /></div>
+        <div class="field"><label>Deadline (date)</label><input type="date" name="deadline" value="${todayISO()}" required /></div>
+        <div class="field"><label>Remark</label><textarea name="remark" rows="3"></textarea></div>
+        <div class="disclose">Set the deadline to any future date to schedule it — it'll show up in Today's To-Do once that date arrives. Once created, use "+ Follow-up" to log updates and reschedule it — the task itself isn't edited directly.</div>
       </div>
-      <div class="modal-foot"><button type="button" class="btn btn-ghost" data-action="closemodal">Cancel</button><button type="submit" class="btn btn-primary">${isEdit?'Save changes':'Add to-do'}</button></div>
+      <div class="modal-foot"><button type="button" class="btn btn-ghost" data-action="closemodal">Cancel</button><button type="submit" class="btn btn-primary">Add to-do</button></div>
       </form>
+    </div>
+  </div>`;
+}
+function modalFollowupForm(){
+  const t = DB.todos.find(x=>x.id===modal.payload.id);
+  if(!t) return '';
+  return `<div class="modal-overlay" data-action="closemodal">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head"><h3>Follow-up — ${escapeHtml(t.taskName)}</h3><button class="modal-close" data-action="closemodal">&times;</button></div>
+      <form id="followupForm">
+      <div class="modal-body">
+        ${modal.payload.err?`<div class="error-msg">${escapeHtml(modal.payload.err)}</div>`:''}
+        <div class="field"><label>Remark</label><textarea name="remark" rows="3" placeholder="What's the update?"></textarea></div>
+        <div class="field"><label>New follow-up date</label><input type="date" name="followupDate" value="${todayISO()}" required /></div>
+        <div class="disclose">This to-do will move to Today's To-Do on the new date. The current entry is kept in its history with the exact date and time.</div>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn btn-ghost" data-action="closemodal">Cancel</button><button type="submit" class="btn btn-primary">Save follow-up</button></div>
+      </form>
+    </div>
+  </div>`;
+}
+function modalFollowupHistory(){
+  const t = DB.todos.find(x=>x.id===modal.payload.id);
+  if(!t) return '';
+  const followups = t.followups||[];
+  return `<div class="modal-overlay" data-action="closemodal">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head"><h3>Follow-up history — ${escapeHtml(t.taskName)}</h3><button class="modal-close" data-action="closemodal">&times;</button></div>
+      <div class="modal-body">
+        ${followups.map(f=>`
+          <div style="padding:10px 0; border-bottom:1px solid var(--line);">
+            <div class="muted" style="font-size:12px; margin-bottom:4px;">Logged ${fmtDateTime(f.createdAt)} · rescheduled to ${fmtDate(f.followupDate)}</div>
+            <div style="font-size:13.5px;">${escapeHtml(f.remark||'(no remark)')}</div>
+          </div>
+        `).join('')}
+        <div style="padding-top:10px;">
+          <div class="muted" style="font-size:12px; margin-bottom:4px;">Originally created ${fmtDate(t.createdAt)}</div>
+          <div style="font-size:13.5px;">${escapeHtml(t.remark||'(no remark)')}</div>
+        </div>
+      </div>
+      <div class="modal-foot"><button class="btn btn-primary" data-action="closemodal">Close</button></div>
     </div>
   </div>`;
 }
@@ -1223,7 +1262,8 @@ function bindEvents(){
   root.querySelectorAll('[data-action="resetalldata"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'resetall', payload:{}}; render(); }));
 
   root.querySelectorAll('[data-action="newtodo"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newtodo', payload:{}}; render(); }));
-  root.querySelectorAll('[data-action="edittodo"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'edittodo', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
+  root.querySelectorAll('[data-action="addfollowup"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'addfollowup', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
+  root.querySelectorAll('[data-action="viewfollowups"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'viewfollowups', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
   root.querySelectorAll('[data-action="deletetodo"]').forEach(el=> el.addEventListener('click', async ()=>{
     if(!confirm('Delete this to-do?')) return;
     try{ await apiDelete(`/api/todos/${el.getAttribute('data-id')}`); await refreshState(); showToast('To-do deleted'); render(); }
@@ -1388,14 +1428,20 @@ function bindEvents(){
   if(todoForm) todoForm.addEventListener('submit', async e=>{
     e.preventDefault();
     const fd = new FormData(todoForm);
-    const payload = {taskName: fd.get('taskName'), deadline: fd.get('deadline'), status: fd.get('status'), remark: fd.get('remark')};
+    const payload = {taskName: fd.get('taskName'), deadline: fd.get('deadline'), remark: fd.get('remark')};
     try{
-      if(modal.type==='edittodo'){
-        await apiPatch(`/api/todos/${modal.payload.id}`, payload);
-      } else {
-        await apiPost('/api/todos', payload);
-      }
-      await refreshState(); modal=null; showToast('To-do saved'); render();
+      await apiPost('/api/todos', payload);
+      await refreshState(); modal=null; showToast('To-do added'); render();
+    }catch(err){ modal.payload.err = err.message; render(); }
+  });
+
+  const followupForm = document.getElementById('followupForm');
+  if(followupForm) followupForm.addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(followupForm);
+    try{
+      await apiPost(`/api/todos/${modal.payload.id}/followups`, {remark: fd.get('remark'), followupDate: fd.get('followupDate')});
+      await refreshState(); modal=null; showToast('Follow-up saved'); render();
     }catch(err){ modal.payload.err = err.message; render(); }
   });
 
