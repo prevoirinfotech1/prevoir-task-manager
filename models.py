@@ -7,6 +7,7 @@ ROLES = ("admin", "manager", "designer")
 CONTENT_TYPES = ("Static", "Reel", "Carousel")
 POSTING_TYPES = ("Story", "Feed")
 PRIORITIES = ("High", "Medium", "Low")
+TODO_STATUSES = ("Pending", "Complete", "Cancelled")
 
 # Many-to-many: a client can have several managers and several designers.
 client_managers = db.Table(
@@ -170,4 +171,37 @@ class OtherTask(db.Model):
             "completedAt": self.completed_at,
             "hasAttachment": bool(self.attachment_data),
             "attachmentName": self.attachment_name,
+        }
+
+
+class PersonalTodo(db.Model):
+    """
+    A private to-do list every login gets — Admin, Manager, and Designer
+    alike. Nothing here is shared or assigned; a todo is only ever visible
+    to the user who created it. 'deadline' doubles as the scheduled day:
+    when today's date matches it, the item shows up in that user's
+    Today's To-Do list.
+    """
+    __tablename__ = "personal_todos"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+
+    task_name = db.Column(db.String(300), nullable=False)
+    deadline = db.Column(db.String(10), nullable=False)  # ISO yyyy-mm-dd — the scheduled day
+    status = db.Column(db.String(20), default="Pending", nullable=False)  # Pending / Complete / Cancelled
+    remark = db.Column(db.Text, default="")
+
+    created_at = db.Column(db.String(10), default=lambda: date.today().isoformat())
+    completed_at = db.Column(db.Text, nullable=True)  # full ISO timestamp, set when marked Complete
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "taskName": self.task_name,
+            "deadline": self.deadline,
+            "status": self.status,
+            "remark": self.remark,
+            "createdAt": self.created_at,
+            "completedAt": self.completed_at,
         }
