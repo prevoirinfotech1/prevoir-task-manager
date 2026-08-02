@@ -11,7 +11,7 @@ from sqlalchemy import or_, inspect, text
 from werkzeug.utils import secure_filename
 
 from extensions import db, login_manager
-from models import User, Client, Task, OtherTask, PRIORITIES, client_managers, client_designers
+from models import User, Client, Task, OtherTask, PersonalTodo, PRIORITIES, TODO_STATUSES, client_managers, client_designers
 from excel_utils import read_rows_from_upload, import_tasks, build_template_workbook
 
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -281,9 +281,14 @@ def register_routes(app):
             )
         other_tasks = [ot.to_dict() for ot in other_tasks_q.order_by(OtherTask.created_at.desc()).all()]
 
+        todos = [
+            t.to_dict()
+            for t in PersonalTodo.query.filter_by(user_id=current_user.id).order_by(PersonalTodo.deadline).all()
+        ]
+
         return jsonify({
             "me": current_user.to_dict(), "users": users, "clients": clients,
-            "tasks": tasks, "otherTasks": other_tasks,
+            "tasks": tasks, "otherTasks": other_tasks, "todos": todos,
         })
 
     # ---------- User management (admin only) ----------
@@ -528,6 +533,56 @@ def register_routes(app):
 
         return jsonify({"added": len(tasks_data), "skipped": skipped, "skippedRows": skipped_rows, "error": None})
 
+
+    # ---------- Personal To-Do (private per login, every role) ----------
+    @app.route("/api/todos", methods=["POST"])
+    @login_required
+    def create_todo():
+        data = request.get_json(silent=True) or {}
+        task_name = (data.get("taskName") or "").strip()
+        deadline = (data.get("deadline") or "").strip()
+        if not task_name:
+            return jsonify({"error": "Task name is required."}), 400
+        if not deadline:
+            return jsonify({"error": "Deadline is required."}), 400
+        status = data.get("status") if data.get("status") in TODO_STATUSES else "Pending"
+        todo = PersonalTodo(
+            user_id=current_user.id, task_name=task_name, deadline=deadline,
+            status=status, remark=(data.get("remark") or "").strip(),
+            completed_at=now_utc_iso() if status == "Complete" else None,
+        )
+        db.session.add(todo)
+        db.session.commit()
+        return jsonify({"todo": todo.to_dict()}), 201
+
+    @app.route("/api/todos/<int:todo_id>", methods=["PATCH"])
+    @login_required
+    def update_todo(todo_id):
+        todo = db.session.get(PersonalTodo, todo_id)
+        if not todo or todo.user_id != current_user.id:
+            return jsonify({"error": "To-do not found."}), 404
+        data = request.get_json(silent=True) or {}
+        if "taskName" in data and data["taskName"].strip():
+            todo.task_name = data["taskName"].strip()
+        if "deadline" in data and data["deadline"]:
+            todo.deadline = data["deadline"]
+        if "remark" in data:
+            todo.remark = (data["remark"] or "").strip()
+        if "status" in data and data["status"] in TODO_STATUSES:
+            todo.status = data["status"]
+            todo.completed_at = now_utc_iso() if todo.status == "Complete" else None
+        db.session.commit()
+        return jsonify({"todo": todo.to_dict()})
+
+    @app.route("/api/todos/<int:todo_id>", methods=["DELETE"])
+    @login_required
+    def delete_todo(todo_id):
+        todo = db.session.get(PersonalTodo, todo_id)
+        if not todo or todo.user_id != current_user.id:
+            return jsonify({"error": "To-do not found."}), 404
+        db.session.delete(todo)
+        db.session.commit()
+        return jsonify({"ok": True})
 
     # ---------- Other Tasks (ad-hoc, not tied to a client) ----------
     @app.route("/api/other-tasks", methods=["POST"])
