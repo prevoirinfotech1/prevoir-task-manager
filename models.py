@@ -180,7 +180,10 @@ class PersonalTodo(db.Model):
     alike. Nothing here is shared or assigned; a todo is only ever visible
     to the user who created it. 'deadline' doubles as the scheduled day:
     when today's date matches it, the item shows up in that user's
-    Today's To-Do list.
+    Today's To-Do list. Instead of being edited directly, a todo is moved
+    forward via follow-ups — each one logs a remark and a new scheduled
+    date, and the todo's deadline updates to that date so it reappears in
+    Today's To-Do when that day arrives. The full history is kept.
     """
     __tablename__ = "personal_todos"
 
@@ -188,12 +191,17 @@ class PersonalTodo(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
 
     task_name = db.Column(db.String(300), nullable=False)
-    deadline = db.Column(db.String(10), nullable=False)  # ISO yyyy-mm-dd — the scheduled day
+    deadline = db.Column(db.String(10), nullable=False)  # ISO yyyy-mm-dd — the currently active scheduled day
     status = db.Column(db.String(20), default="Pending", nullable=False)  # Pending / Complete / Cancelled
-    remark = db.Column(db.Text, default="")
+    remark = db.Column(db.Text, default="")  # the original remark, set at creation
 
     created_at = db.Column(db.String(10), default=lambda: date.today().isoformat())
     completed_at = db.Column(db.Text, nullable=True)  # full ISO timestamp, set when marked Complete
+
+    followups = db.relationship(
+        "TodoFollowup", backref="todo", cascade="all, delete-orphan",
+        order_by="TodoFollowup.id.desc()",
+    )
 
     def to_dict(self):
         return {
@@ -204,4 +212,24 @@ class PersonalTodo(db.Model):
             "remark": self.remark,
             "createdAt": self.created_at,
             "completedAt": self.completed_at,
+            "followups": [f.to_dict() for f in self.followups],
+        }
+
+
+class TodoFollowup(db.Model):
+    __tablename__ = "todo_followups"
+
+    id = db.Column(db.Integer, primary_key=True)
+    todo_id = db.Column(db.Integer, db.ForeignKey("personal_todos.id"), nullable=False, index=True)
+    remark = db.Column(db.Text, default="")
+    followup_date = db.Column(db.String(10), nullable=False)  # ISO yyyy-mm-dd — the new scheduled day
+    created_at = db.Column(db.Text, nullable=False)  # full ISO timestamp — when this follow-up was logged
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "todoId": self.todo_id,
+            "remark": self.remark,
+            "followupDate": self.followup_date,
+            "createdAt": self.created_at,
         }
