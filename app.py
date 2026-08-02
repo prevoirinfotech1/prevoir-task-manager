@@ -11,7 +11,7 @@ from sqlalchemy import or_, inspect, text
 from werkzeug.utils import secure_filename
 
 from extensions import db, login_manager
-from models import User, Client, Task, OtherTask, PersonalTodo, PRIORITIES, TODO_STATUSES, client_managers, client_designers
+from models import User, Client, Task, OtherTask, PersonalTodo, TodoFollowup, PRIORITIES, TODO_STATUSES, client_managers, client_designers
 from excel_utils import read_rows_from_upload, import_tasks, build_template_workbook
 
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -557,22 +557,39 @@ def register_routes(app):
 
     @app.route("/api/todos/<int:todo_id>", methods=["PATCH"])
     @login_required
-    def update_todo(todo_id):
+    def update_todo_status(todo_id):
+        """Status transitions only (Mark complete / Cancel / Reopen). Task
+        name, deadline, and remark are not directly editable — use the
+        follow-up endpoint below to reschedule with a logged remark instead."""
         todo = db.session.get(PersonalTodo, todo_id)
         if not todo or todo.user_id != current_user.id:
             return jsonify({"error": "To-do not found."}), 404
         data = request.get_json(silent=True) or {}
-        if "taskName" in data and data["taskName"].strip():
-            todo.task_name = data["taskName"].strip()
-        if "deadline" in data and data["deadline"]:
-            todo.deadline = data["deadline"]
-        if "remark" in data:
-            todo.remark = (data["remark"] or "").strip()
-        if "status" in data and data["status"] in TODO_STATUSES:
-            todo.status = data["status"]
-            todo.completed_at = now_utc_iso() if todo.status == "Complete" else None
+        if data.get("status") not in TODO_STATUSES:
+            return jsonify({"error": "Invalid status."}), 400
+        todo.status = data["status"]
+        todo.completed_at = now_utc_iso() if todo.status == "Complete" else None
         db.session.commit()
         return jsonify({"todo": todo.to_dict()})
+
+    @app.route("/api/todos/<int:todo_id>/followups", methods=["POST"])
+    @login_required
+    def add_todo_followup(todo_id):
+        todo = db.session.get(PersonalTodo, todo_id)
+        if not todo or todo.user_id != current_user.id:
+            return jsonify({"error": "To-do not found."}), 404
+        data = request.get_json(silent=True) or {}
+        followup_date = (data.get("followupDate") or "").strip()
+        if not followup_date:
+            return jsonify({"error": "A new follow-up date is required."}), 400
+        remark = (data.get("remark") or "").strip()
+
+        db.session.add(TodoFollowup(
+            todo_id=todo.id, remark=remark, followup_date=followup_date, created_at=now_utc_iso(),
+        ))
+        todo.deadline = followup_date  # reschedules it — it'll now show in Today's To-Do on this date
+        db.session.commit()
+        return jsonify({"todo": todo.to_dict()}), 201
 
     @app.route("/api/todos/<int:todo_id>", methods=["DELETE"])
     @login_required
