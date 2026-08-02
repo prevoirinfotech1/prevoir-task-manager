@@ -22,8 +22,9 @@ const apiDelete = (path)=> api(path, {method:'DELETE'});
 const CONTENT_TYPES = ['Static','Reel','Carousel'];
 const POSTING_TYPES = ['Story','Feed'];
 const PRIORITIES_JS = ['High','Medium','Low'];
+const TODO_STATUSES_JS = ['Pending','Complete','Cancelled'];
 
-let DB = { users: [], clients: [], tasks: [], otherTasks: [] };
+let DB = { users: [], clients: [], tasks: [], otherTasks: [], todos: [] };
 let session = null;
 let ui = { tab:'dashboard', clientId:null, navOpen:false, taskFilter:'all', taskClientFilter:'all', taskSearch:'', taskMonthFilter:'all', urgentMonthFilter:'all', otherTaskMonthFilter:'all', dashboardFilter:null, otherTaskFilter:'all', designerDateFilter:'today', designerCustomFrom:'', designerCustomTo:'', clientMonth:'', clientSelectedDay:null, clientTableScope:'month', loginErr:null, loginBusy:false };
 let modal = null;
@@ -54,7 +55,7 @@ function showToast(msg){ toastMsg = msg; render(); setTimeout(()=>{ toastMsg=nul
 async function refreshState(){
   const data = await apiGet('/api/state');
   session = data.me;
-  DB.users = data.users; DB.clients = data.clients; DB.tasks = data.tasks; DB.otherTasks = data.otherTasks || [];
+  DB.users = data.users; DB.clients = data.clients; DB.tasks = data.tasks; DB.otherTasks = data.otherTasks || []; DB.todos = data.todos || [];
 }
 
 /* ============================= DERIVED HELPERS ============================= */
@@ -192,7 +193,8 @@ const ICONS = {
   clock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
   key:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="M11 12 20 3M20 3h-4M20 3v4"/></svg>',
   flame:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2c1 3-3 4-3 8a3 3 0 0 0 6 0c0-1-1-2-1-3 2 1 3 3 3 6a5 5 0 0 1-10 0c0-5 3-6 5-11Z"/></svg>',
-  chart:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V11"/><path d="M10 19V5"/><path d="M16 19v-7"/><path d="M3 19h18"/></svg>'
+  chart:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V11"/><path d="M10 19V5"/><path d="M16 19v-7"/><path d="M3 19h18"/></svg>',
+  todo:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M7 9l1.5 1.5L11 8"/><path d="M14 9h6"/><path d="M7 15.5l1.5 1.5L11 14.5"/><path d="M14 15.5h6"/></svg>'
 };
 function navItemsFor(role){
   if(role==='admin') return [
@@ -204,6 +206,7 @@ function navItemsFor(role){
     ['urgenttasks','Urgent Tasks','flame'],
     ['othertasks','Other Tasks','clock'],
     ['performance','Performance','chart'],
+    ['todos','My To-Do','todo'],
   ];
   if(role==='manager') return [
     ['dashboard','Dashboard','dashboard'],
@@ -211,6 +214,7 @@ function navItemsFor(role){
     ['alltasks','All Tasks','tasks'],
     ['urgenttasks','Urgent Tasks','flame'],
     ['othertasks','Other Tasks','clock'],
+    ['todos','My To-Do','todo'],
   ];
   return [
     ['dashboard','My Pending Tasks','clock'],
@@ -218,6 +222,7 @@ function navItemsFor(role){
     ['myclients','My Clients','clients'],
     ['urgenttasks','Urgent Tasks','flame'],
     ['othertasks','Other Tasks','clock'],
+    ['todos','My To-Do','todo'],
   ];
 }
 function renderSidebar(){
@@ -246,6 +251,7 @@ function renderApp(){
     alltasks: 'All Tasks',
     urgenttasks:'Urgent Tasks',
     performance:'Performance',
+    todos:'My To-Do',
     myclients:'My Clients', othertasks:'Other Tasks'
   };
   return `
@@ -274,6 +280,7 @@ function renderTab(){
   if(ui.tab==='alltasks') return renderAllTasks();
   if(ui.tab==='urgenttasks') return renderUrgentTasks();
   if(ui.tab==='performance') return session.role==='admin' ? renderAdminPerformance() : renderDesignerPerformance();
+  if(ui.tab==='todos') return renderTodos();
   if(ui.tab==='myclients') return ui.clientId ? renderClientDetail(ui.clientId) : renderMyClients();
   if(ui.tab==='othertasks') return renderOtherTasks();
   return '';
@@ -720,6 +727,53 @@ function renderAdminPerformance(){
   </div>`;
 }
 
+/* ============================= PERSONAL TO-DO (private, every login) ============================= */
+function todoStatusPill(status){
+  if(status==='Complete') return '<span class="pill pill-completed">Complete</span>';
+  if(status==='Cancelled') return '<span class="pill pill-neutral">Cancelled</span>';
+  return '<span class="pill pill-pending">Pending</span>';
+}
+function todoDeadlineTag(t){
+  const d = daysDiff(t.deadline);
+  let style='';
+  if(t.status==='Pending' && !isNaN(d)){
+    if(d<0) style='color:var(--danger)';
+    else if(d<=2) style='color:#9a6b12';
+  }
+  return `<span class="deadline-tag" style="${style}">${fmtDate(t.deadline)}</span>`;
+}
+function renderTodoRows(list){
+  if(!list.length) return `<div class="empty-state"><b>Nothing here</b>Add a to-do to get started.</div>`;
+  return `<table><thead><tr><th>Task</th><th>Deadline</th><th>Status</th><th>Remark</th><th></th></tr></thead><tbody>
+  ${list.map(t=>`<tr class="row-hover">
+    <td><b>${escapeHtml(t.taskName)}</b></td>
+    <td>${todoDeadlineTag(t)}</td>
+    <td>${todoStatusPill(t.status)}${t.status==='Complete' && t.completedAt?`<div class="muted" style="font-size:11px; margin-top:3px;">Completed ${fmtDateTime(t.completedAt)}</div>`:''}</td>
+    <td class="cell-wrap">${escapeHtml(t.remark||'—')}</td>
+    <td style="white-space:nowrap;">
+      ${t.status==='Pending'?`<button class="btn btn-sm btn-accent" data-action="todocomplete" data-id="${t.id}">Mark complete</button> <button class="btn btn-sm btn-ghost" data-action="todocancel" data-id="${t.id}">Cancel</button>`:''}
+      ${t.status!=='Pending'?`<button class="btn btn-sm btn-ghost" data-action="todoreopen" data-id="${t.id}">Reopen</button>`:''}
+      <button class="btn btn-sm btn-ghost" data-action="edittodo" data-id="${t.id}">Edit</button>
+      <button class="btn btn-sm btn-danger" data-action="deletetodo" data-id="${t.id}">Delete</button>
+    </td>
+  </tr>`).join('')}
+  </tbody></table>`;
+}
+function renderTodos(){
+  const today = todayISO();
+  const todays = DB.todos.filter(t=>t.deadline===today);
+  const upcoming = [...DB.todos].filter(t=>t.deadline!==today).sort((a,b)=>(a.deadline||'').localeCompare(b.deadline||''));
+  return `
+  <div class="panel">
+    <div class="panel-head"><h3>Today's To-Do (${todays.length})</h3><button class="btn btn-primary btn-sm" data-action="newtodo">+ Add to-do</button></div>
+    <div class="panel-body pad0">${renderTodoRows(todays)}</div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h3>Scheduled for other dates (${upcoming.length})</h3></div>
+    <div class="panel-body pad0">${renderTodoRows(upcoming)}</div>
+  </div>`;
+}
+
 /* ============================= MANAGER / DESIGNER: MY CLIENTS ============================= */
 function renderMyClients(){
   const list = clientsForUser();
@@ -927,6 +981,8 @@ function renderModal(){
   if(modal.type==='editother') return modalOtherTaskForm(true);
   if(modal.type==='importresult') return modalImportResult();
   if(modal.type==='resetall') return modalResetAll();
+  if(modal.type==='newtodo') return modalTodoForm();
+  if(modal.type==='edittodo') return modalTodoForm(true);
   return '';
 }
 function modalNewUser(){
@@ -1074,6 +1130,28 @@ function modalResetAll(){
     </div>
   </div>`;
 }
+function modalTodoForm(isEdit){
+  const t = isEdit ? DB.todos.find(x=>x.id===modal.payload.id) : null;
+  const v = (f,d)=> t ? (t[f]!=null?t[f]:'') : (d||'');
+  return `<div class="modal-overlay" data-action="closemodal">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-head"><h3>${isEdit?'Edit to-do':'Add to-do'}</h3><button class="modal-close" data-action="closemodal">&times;</button></div>
+      <form id="todoForm">
+      <div class="modal-body">
+        ${modal.payload.err?`<div class="error-msg">${escapeHtml(modal.payload.err)}</div>`:''}
+        <div class="field"><label>Task name</label><input name="taskName" value="${escapeHtml(v('taskName'))}" required /></div>
+        <div class="grid-2">
+          <div class="field"><label>Deadline (date)</label><input type="date" name="deadline" value="${v('deadline', todayISO())}" required /></div>
+          <div class="field"><label>Status</label><select name="status">${TODO_STATUSES_JS.map(s=>`<option ${v('status','Pending')===s?'selected':''}>${s}</option>`).join('')}</select></div>
+        </div>
+        <div class="field"><label>Remark</label><textarea name="remark" rows="3">${escapeHtml(v('remark'))}</textarea></div>
+        <div class="disclose">Set the deadline to any future date to schedule it — it'll show up in Today's To-Do once that date arrives.</div>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn btn-ghost" data-action="closemodal">Cancel</button><button type="submit" class="btn btn-primary">${isEdit?'Save changes':'Add to-do'}</button></div>
+      </form>
+    </div>
+  </div>`;
+}
 function modalImportResult(){
   const {added, skipped, error, skippedRows, detectedHeaders} = modal.payload;
   if(error){
@@ -1143,6 +1221,26 @@ function bindEvents(){
 
   root.querySelectorAll('[data-action="newuser"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newuser', payload:{role:el.getAttribute('data-role')}}; render(); }));
   root.querySelectorAll('[data-action="resetalldata"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'resetall', payload:{}}; render(); }));
+
+  root.querySelectorAll('[data-action="newtodo"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newtodo', payload:{}}; render(); }));
+  root.querySelectorAll('[data-action="edittodo"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'edittodo', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
+  root.querySelectorAll('[data-action="deletetodo"]').forEach(el=> el.addEventListener('click', async ()=>{
+    if(!confirm('Delete this to-do?')) return;
+    try{ await apiDelete(`/api/todos/${el.getAttribute('data-id')}`); await refreshState(); showToast('To-do deleted'); render(); }
+    catch(err){ showToast(err.message); }
+  }));
+  root.querySelectorAll('[data-action="todocomplete"]').forEach(el=> el.addEventListener('click', async ()=>{
+    try{ await apiPatch(`/api/todos/${el.getAttribute('data-id')}`, {status:'Complete'}); await refreshState(); showToast('Marked complete'); render(); }
+    catch(err){ showToast(err.message); }
+  }));
+  root.querySelectorAll('[data-action="todocancel"]').forEach(el=> el.addEventListener('click', async ()=>{
+    try{ await apiPatch(`/api/todos/${el.getAttribute('data-id')}`, {status:'Cancelled'}); await refreshState(); showToast('To-do cancelled'); render(); }
+    catch(err){ showToast(err.message); }
+  }));
+  root.querySelectorAll('[data-action="todoreopen"]').forEach(el=> el.addEventListener('click', async ()=>{
+    try{ await apiPatch(`/api/todos/${el.getAttribute('data-id')}`, {status:'Pending'}); await refreshState(); showToast('To-do reopened'); render(); }
+    catch(err){ showToast(err.message); }
+  }));
   root.querySelectorAll('[data-action="newclient"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'newclient', payload:{}}; render(); }));
   root.querySelectorAll('[data-action="resetpw"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'resetpw', payload:{id:Number(el.getAttribute('data-id'))}}; render(); }));
   root.querySelectorAll('[data-action="changepw"]').forEach(el=> el.addEventListener('click', ()=>{ modal={type:'changepw', payload:{}}; render(); }));
@@ -1283,6 +1381,21 @@ function bindEvents(){
     try{
       await apiPost('/api/admin/reset-all-data', {confirm: 'RESET'});
       await refreshState(); modal=null; ui.tab='dashboard'; ui.clientId=null; showToast('All data has been reset'); render();
+    }catch(err){ modal.payload.err = err.message; render(); }
+  });
+
+  const todoForm = document.getElementById('todoForm');
+  if(todoForm) todoForm.addEventListener('submit', async e=>{
+    e.preventDefault();
+    const fd = new FormData(todoForm);
+    const payload = {taskName: fd.get('taskName'), deadline: fd.get('deadline'), status: fd.get('status'), remark: fd.get('remark')};
+    try{
+      if(modal.type==='edittodo'){
+        await apiPatch(`/api/todos/${modal.payload.id}`, payload);
+      } else {
+        await apiPost('/api/todos', payload);
+      }
+      await refreshState(); modal=null; showToast('To-do saved'); render();
     }catch(err){ modal.payload.err = err.message; render(); }
   });
 
